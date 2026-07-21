@@ -265,8 +265,10 @@ def nearest_monster(cx: float, cy: float, monsters: list[dict]) -> dict | None:
 
 def decide(state: GameState, wm: WorldModel,
            patrol_direction: str,
-           transition_in_progress: bool) -> tuple[Command, str, str]:
-    """返回 (command, new_patrol_direction, log_text)"""
+           transition_in_progress: bool,
+           min_monsters_on_platform: int = 3) -> tuple[Command, str, str]:
+    """返回 (command, new_patrol_direction, log_text)
+    min_monsters_on_platform: 当前平台怪物数少于此值时触发平台切换"""
     cx, cy = state.player_screen_x, state.player_screen_y
     monsters = state.monsters
     facing = state.facing
@@ -283,12 +285,55 @@ def decide(state: GameState, wm: WorldModel,
         log_lines.append("动作: 平台移动中，等待完成...")
         return IdleCommand(), patrol_direction, "\n".join(log_lines)
 
+    # 角色在绳梯上 → 沿巡逻方向找最近绳梯边继续爬
+    # 不依赖 current_platform（玩家可能处于平台间空隙，find_platform 返回 None）
+    if state.on_rope:
+        # 在 wm.edges 里找当前坐标最近且能朝巡逻方向走的绳梯
+        candidate = None
+        for e in wm.edges:
+            if e.get("type") != "rope":
+                continue
+            if patrol_direction == "up" and e.get("direction") != "up":
+                continue
+            if patrol_direction == "down" and e.get("direction") != "down":
+                continue
+            top = e.get("top", {})
+            bottom = e.get("bottom", {})
+            rx = float(top.get("x", 9999))
+            ty = float(top.get("y", 9999))
+            by = float(bottom.get("y", 9999))
+            y_min, y_max = sorted([ty, by])
+            if abs(state.player_minimap_x - rx) > 8:
+                continue
+            if not (y_min <= state.player_minimap_y <= y_max):
+                continue
+            candidate = e
+            break
+        if candidate is not None:
+            d = candidate.get("direction", patrol_direction)
+            exit_x = wm.get_exit_minimap_x(candidate)
+            target_y = wm.get_exit_target_y(candidate) or 0
+            dep_y = state.player_minimap_y
+            if current_platform:
+                for p in wm.platforms:
+                    if p["id"] == current_platform:
+                        dep_y = float(p.get("avg_y", 0))
+                        break
+            log_lines.append(f"动作: 在绳梯上 (x={state.player_minimap_x:.0f}, y={state.player_minimap_y:.0f})，"
+                             f"继续向{'上' if d == 'up' else '下'}爬升")
+            return ClimbCommand(d, exit_x, target_y, dep_y,
+                                target_platform=candidate["to_platform"]), patrol_direction, "\n".join(log_lines)
+        else:
+            log_lines.append("动作: 在绳梯上但未找到匹配绳梯边，待机")
+            return IdleCommand(), patrol_direction, "\n".join(log_lines)
+
     on_plat = [m for m in monsters if abs(m["y2"] - cy) <= PLATFORM_TOLERANCE]
     diff_plat = len(monsters) - len(on_plat)
-    log_lines.append(f"怪物: 视野{len(monsters)}只 (同平台{len(on_plat)} / 其他{diff_plat})")
+    log_lines.append(f"怪物: 视野{len(monsters)}只 (同平台{len(on_plat)} / 其他{diff_plat})  "
+                     f"阈值={min_monsters_on_platform}")
 
     for i, m in enumerate(on_plat[:8]):
-        nm = config.CLASS_NAMES.get(m.get("cls", 99), "?")
+        nm_cn = config.CLASS_NAMES.get(m.get("cls", 99), "?")
         dx = m["cx"] - cx
         dy = m["y2"] - cy
         in_range = abs(dx) < ATTACK_DISTANCE and abs(dy) < ATTACK_VERTICAL
@@ -303,38 +348,41 @@ def decide(state: GameState, wm: WorldModel,
             status.append("同平台待追")
         else:
             status.append("不同平台")
-        log_lines.append(f"  #{i} {nm} 中心({m['cx']:.0f},{m['cy']:.0f}) "
+        log_lines.append(f"  #{i} {nm_cn} 中心({m['cx']:.0f},{m['cy']:.0f}) "
                          f"dx={dx:+.0f} dy={dy:+.0f} 距离={dist:.0f} {'|'.join(status)}")
 
-    # 打怪决策
-    nm = nearest_monster(cx, cy, monsters)
-    if nm is not None:
-        dx = nm["cx"] - cx
-        dy_foot = nm["y2"] - cy
-        in_range = abs(dx) < ATTACK_DISTANCE and abs(dy_foot) < ATTACK_VERTICAL
-        same_dir = (dx >= 0) == (facing == 'r')
+    # 打怪决策（仅当同平台怪物数 ≥ 阈值时执行）
+    if len(on_plat) >= min_monsters_on_platform:
+        nm = nearest_monster(cx, cy, monsters)
+        if nm is not None:
+            dx = nm["cx"] - cx
+            dy_foot = nm["y2"] - cy
+            in_range = abs(dx) < ATTACK_DISTANCE and abs(dy_foot) < ATTACK_VERTICAL
+            same_dir = (dx >= 0) == (facing == 'r')
 
-        # 统计前方/后方攻击范围内的怪物数
-        front_count = sum(1 for m in on_plat
-                          if abs(m["cx"] - cx) < ATTACK_DISTANCE and abs(m["y2"] - cy) < ATTACK_VERTICAL
-                          and ((m["cx"] - cx >= 0) == (facing == 'r')))
-        back_count = sum(1 for m in on_plat
-                         if abs(m["cx"] - cx) < ATTACK_DISTANCE and abs(m["y2"] - cy) < ATTACK_VERTICAL
-                         and ((m["cx"] - cx >= 0) != (facing == 'r')))
-        total_close = front_count + back_count
+            # 统计前方/后方攻击范围内的怪物数
+            front_count = sum(1 for m in on_plat
+                              if abs(m["cx"] - cx) < ATTACK_DISTANCE and abs(m["y2"] - cy) < ATTACK_VERTICAL
+                              and ((m["cx"] - cx >= 0) == (facing == 'r')))
+            back_count = sum(1 for m in on_plat
+                             if abs(m["cx"] - cx) < ATTACK_DISTANCE and abs(m["y2"] - cy) < ATTACK_VERTICAL
+                             and ((m["cx"] - cx >= 0) != (facing == 'r')))
+            total_close = front_count + back_count
 
-        if in_range and same_dir:
-            log_lines.append(f"动作: 正前方攻击距离内有{total_close}只怪物，攻击")
-            return AttackCommand(), patrol_direction, "\n".join(log_lines)
-        elif in_range:
-            new_facing = 'r' if nm["cx"] > cx else 'l'
-            log_lines.append(f"动作: 身后有{total_close}只怪物，转身追击（转向{new_facing}）")
-            return TurnAndAttackCommand(new_facing), patrol_direction, "\n".join(log_lines)
-        else:
-            need_jump = dy_foot < JUMP_THRESHOLD
-            jmp = " +跳跃" if need_jump else ""
-            log_lines.append(f"动作: 追踪最近怪物（距离{((dx)**2+(dy_foot)**2)**0.5:.0f}px）{jmp}")
-            return MoveToCommand(nm["cx"], need_jump=need_jump), patrol_direction, "\n".join(log_lines)
+            if in_range and same_dir:
+                log_lines.append(f"动作: 正前方攻击距离内有{total_close}只怪物，攻击")
+                return AttackCommand(), patrol_direction, "\n".join(log_lines)
+            elif in_range:
+                new_facing = 'r' if nm["cx"] > cx else 'l'
+                log_lines.append(f"动作: 身后有{total_close}只怪物，转身追击（转向{new_facing}）")
+                return TurnAndAttackCommand(new_facing), patrol_direction, "\n".join(log_lines)
+            else:
+                need_jump = dy_foot < JUMP_THRESHOLD
+                jmp = " +跳跃" if need_jump else ""
+                log_lines.append(f"动作: 追踪最近怪物（距离{((dx)**2+(dy_foot)**2)**0.5:.0f}px）{jmp}")
+                return MoveToCommand(nm["cx"], need_jump=need_jump), patrol_direction, "\n".join(log_lines)
+    else:
+        log_lines.append(f"动作: 同平台仅{len(on_plat)}只怪物(阈值{min_monsters_on_platform})，切换平台")
 
     # 寻路决策
     if current_platform is None:

@@ -94,7 +94,7 @@ class WorldModel:
     def get_exit_minimap_x(self, edge: dict) -> float:
         if edge["type"] == "rope":
             return edge.get("minimap_x", edge.get("top", {}).get("x", 0))
-        # jump / flash: 用 from 字段（不是 from_pt）
+        # jump / flash: 用 from 字段
         return edge.get("from", {}).get("x", 0)
 
     def get_exit_target_y(self, edge: dict) -> float | None:
@@ -108,9 +108,21 @@ class WorldModel:
 def load_world_model(path: str) -> WorldModel:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    adjacency: dict[str, list[dict]] = data.get("adjacency", {})
+    edges: list[dict] = data.get("edges", [])
+
+    # 容错：如果 JSON 中缺少 adjacency，从 edges 自动构建
+    if not adjacency and edges:
+        adjacency = {}
+        for e in edges:
+            from_pid: str = e.get("from_platform", "")
+            if from_pid:
+                adjacency.setdefault(from_pid, []).append(e)
+
     return WorldModel(
         platforms=data.get("platforms", []),
-        edges=data.get("edges", []),
-        adjacency=data.get("adjacency", {}),
+        edges=edges,
+        adjacency=adjacency,
         mm_region=data.get("mm_region", [8, 97, 128, 208]),
     )

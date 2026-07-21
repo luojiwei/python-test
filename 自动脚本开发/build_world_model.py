@@ -326,18 +326,25 @@ def build_adjacency(
 
 # ---------- 主流程 ----------
 
-def build_world_model(maps_path: str, output_path: str) -> None:
+def build_world_model(maps_path: str, output_path: str, map_name: str | None = None) -> None:
     raw = load_maps(maps_path)
 
-    # 一张地图只处理第一个（同名覆盖）
-    map_name = list(raw.keys())[0]
-    map_data = raw[map_name]
+    # 支持指定地图名，否则用第一张
+    if map_name:
+        if map_name not in raw:
+            print(f"错误: 地图 '{map_name}' 不在 {maps_path} 中")
+            print(f"可用地图: {list(raw.keys())}")
+            sys.exit(1)
+        map_data = raw[map_name]
+    else:
+        map_name = list(raw.keys())[0]
+        map_data = raw[map_name]
 
     print(f"地图: {map_name}")
     print(f"  原始平台数: {len(map_data.get('platforms', []))}")
     print(f"  绳梯数:     {len(map_data.get('ropes', []))}")
     print(f"  跳跃点数:   {len(map_data.get('jumps', []))}")
-    print(f"  闪现点数:   {len(map_data.get('flashes', []))}")
+    print(f"  闪现点数:   {len(map_data.get('flash_points', []))}")
 
     # 1. 平台排序 + ID
     platforms = assign_platform_ids(map_data)
@@ -437,6 +444,19 @@ def build_world_model(maps_path: str, output_path: str) -> None:
 
 
 if __name__ == "__main__":
-    maps_path = r"D:\Program Files (x86)\Tencent\WorkBuddy\脚本开发工具\地图标记工具\marker_output\maps.json"
-    output_path = r"D:\Program Files (x86)\Tencent\WorkBuddy\自动脚本开发\world_model.json"
-    build_world_model(maps_path, output_path)
+    import os
+    # 支持命令行参数: python build_world_model.py <map_name> [input_path] [output_path]
+    if len(sys.argv) >= 2:
+        map_name = sys.argv[1]
+        maps_path = sys.argv[2] if len(sys.argv) >= 3 else \
+            r"D:\Program Files (x86)\Tencent\WorkBuddy\python-test\脚本开发工具\地图标记工具\marker_output\maps.json"
+        output_path = sys.argv[3] if len(sys.argv) >= 4 else \
+            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "maps", map_name, "world_model.json")
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        build_world_model(maps_path, output_path, map_name=map_name)
+    else:
+        maps_path = r"D:\Program Files (x86)\Tencent\WorkBuddy\python-test\脚本开发工具\地图标记工具\marker_output\maps.json"
+        output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "world_model.json")
+        build_world_model(maps_path, output_path)

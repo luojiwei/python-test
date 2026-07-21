@@ -31,7 +31,7 @@ from input_utils import (
     capture_frame, capture_minimap,
 )
 from perception import (
-    find_character, detect_monsters, find_yellow_dot, GameState,
+    find_character, detect_monsters, find_yellow_dot, detect_on_rope, GameState,
 )
 from world_model import WorldModel, load_world_model
 from commands import Command, ClimbCommand, MoveToCommand, decide
@@ -51,6 +51,9 @@ class AutoFarmV2App:
         self.search_region: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.keys = KeySender()
         self.keys.set_log_callback(self._on_key)
+
+        # --- 持久化日志 ---
+        self._log_file: str = str(PROJECT_DIR / "run.log")
         self.frame_count: int = 0
         self.yolo_model = None
         self._patrol_direction: str = "up"
@@ -77,6 +80,9 @@ class AutoFarmV2App:
         self._skill_add_btn: tk.Button | None = None
         self._skill_cols: list[tk.Frame] = []     # 两列的容器
 
+        # --- 决策配置 ---
+        self.min_monsters_var = tk.IntVar(value=3)
+
         # --- GUI ---
         root.title("自动打怪 v2")
         root.geometry("800x740")
@@ -85,8 +91,24 @@ class AutoFarmV2App:
         # 状态变量（先创建，footer 会用到）
         self.status_var = tk.StringVar(value="就绪 — 点击按钮开始")
 
+        # --- 底部：游戏控制 footer（先打包，确保始终可见）---
+        self._build_footer(root)
+
+        # --- Notebook 分页 ---
+        notebook = ttk.Notebook(root)
+        notebook.pack(side="top", fill="both", expand=True, padx=5, pady=(5, 0))
+
+        config_tab = tk.Frame(notebook)
+        log_tab = tk.Frame(notebook)
+        notebook.add(config_tab, text="配置")
+        notebook.add(log_tab, text="日志")
+
+        # ========================
+        # Tab 1: 配置
+        # ========================
+
         # --- 顶部：技能面板 ---
-        self._build_skill_panel(root)
+        self._build_skill_panel(config_tab)
 
         # 尝试加载缓存配置
         cache_path = PROJECT_DIR / "skill_config.json"
@@ -115,24 +137,8 @@ class AutoFarmV2App:
             self._add_skill_row()  # 默认左列
             self._add_skill_row()  # 默认右列
 
-        # --- 中部：日志 ---
-        tk.Label(root, text="决策日志",
-                 font=("Microsoft YaHei", 10, "bold"), fg="#333").pack(anchor="w", padx=15, pady=(8, 2))
-        self.log_text = ScrolledText(root, font=("Consolas", 9), height=14, width=96,
-                                     wrap="word", state="disabled", bg="#1e1e1e", fg="#d4d4d4")
-        self.log_text.pack(fill="both", expand=True, padx=15, pady=(0, 5))
-
-        tk.Label(root, text="运行信息",
-                 font=("Microsoft YaHei", 10, "bold"), fg="#333").pack(anchor="w", padx=15, pady=(5, 2))
-        self.err_text = ScrolledText(root, font=("Consolas", 9), height=5, width=96,
-                                     wrap="word", state="disabled", bg="#2d1e1e", fg="#f48771")
-        self.err_text.pack(fill="x", padx=15, pady=(0, 5))
-
-        tk.Label(root, text="⚠ 运行中请勿操作键盘，点停止会释放所有按键",
-                 font=("Microsoft YaHei", 7), fg="#f39c12").pack(pady=(0, 3))
-
-        # --- 底部：游戏控制 footer ---
-        self._build_footer(root)
+        # --- 决策配置 ---
+        self._build_decision_config(config_tab)
 
         # 恢复缓存地图
         if cached_map and hasattr(self, 'map_var'):
@@ -141,11 +147,48 @@ class AutoFarmV2App:
             except Exception:
                 pass
 
+        # ========================
+        # Tab 2: 日志
+        # ========================
+
+        log_tab.grid_rowconfigure(0, weight=0)  # heading
+        log_tab.grid_rowconfigure(1, weight=2)  # 决策日志
+        log_tab.grid_rowconfigure(2, weight=0)  # heading
+        log_tab.grid_rowconfigure(3, weight=1)  # 运行信息
+        log_tab.grid_columnconfigure(0, weight=1)
+
+        tk.Label(log_tab, text="决策日志",
+                 font=("Microsoft YaHei", 10, "bold"), fg="#333").grid(row=0, column=0, sticky="w", padx=10, pady=(8, 2))
+        self.log_text = ScrolledText(log_tab, font=("Consolas", 9),
+                                     wrap="word", state="disabled", bg="#1e1e1e", fg="#d4d4d4")
+        self.log_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 5))
+
+        tk.Label(log_tab, text="运行信息",
+                 font=("Microsoft YaHei", 10, "bold"), fg="#333").grid(row=2, column=0, sticky="w", padx=10, pady=(5, 2))
+        self.err_text = ScrolledText(log_tab, font=("Consolas", 9),
+                                     wrap="word", state="disabled", bg="#2d1e1e", fg="#f48771")
+        self.err_text.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 5))
+
+        # --- 全局警告 ---
+        tk.Label(root, text="⚠ 运行中请勿操作键盘，点停止会释放所有按键",
+                 font=("Microsoft YaHei", 7), fg="#f39c12").pack(pady=(0, 3))
+
     # --- 线程安全的日志输出 ---
 
     _decision_seq: int = 0  # 决策序号
 
+    def _log_to_file(self, text: str) -> None:
+        """追加到持久化日志文件"""
+        try:
+            with open(self._log_file, "a", encoding="utf-8") as f:
+                from datetime import datetime
+                ts = datetime.now().strftime("%H:%M:%S")
+                f.write(f"[{ts}] {text}\n")
+        except Exception:
+            pass
+
     def _log_decision(self, text: str) -> None:
+        self._log_to_file(f"[决策] {text}")
         def _write() -> None:
             self._decision_seq += 1
             self.log_text.config(state="normal")
@@ -159,6 +202,7 @@ class AutoFarmV2App:
         self.root.after(0, _write)
 
     def _log_error(self, text: str) -> None:
+        self._log_to_file(f"[运行] {text}")
         def _write() -> None:
             self.err_text.config(state="normal")
             self.err_text.insert("end", f"{text}\n")
@@ -218,7 +262,6 @@ class AutoFarmV2App:
 
         template_rect = tuple(map_cfg.get("template_rect", [85, 728, 150, 745]))
         mm_region = tuple(map_cfg.get("mm_region", [8, 97, 128, 208]))
-        config.MONSTER_CLASSES = set(map_cfg.get("monster_classes", []))
 
         self._update_status(f"加载世界模型 [{map_name}]...")
         try:
@@ -240,7 +283,7 @@ class AutoFarmV2App:
             config.CLASS_NAMES.clear(); config.CLASS_NAMES.update(self.yolo_model.names)
         elif hasattr(self.yolo_model.model, 'names'):
             config.CLASS_NAMES.clear(); config.CLASS_NAMES.update(self.yolo_model.model.names)
-        self._log_error(f"YOLO: {len(config.CLASS_NAMES)}类  怪物={config.MONSTER_CLASSES}")
+        self._log_error(f"YOLO: {len(config.CLASS_NAMES)}类  黑名单={config.NON_MONSTER_NAMES}")
 
         self._update_status("截取角色名模板...")
         try:
@@ -433,6 +476,7 @@ class AutoFarmV2App:
 
                 # ---- 感知 ----
                 if now - self._last_perception >= PERCEPTION_INTERVAL:
+                    # 1) 角色屏幕定位（模板匹配，宠物名遮挡时可能失败）
                     char = find_character(frame, self.template, self.search_region)
                     if char is None:
                         self._char_lost_frames += 1
@@ -441,25 +485,31 @@ class AutoFarmV2App:
                             if self._edge_recover_ticks == 0:
                                 self._edge_recover_dir = None
                                 self.keys.release_all()
-                            continue
-                        # 连续 5 帧找不到角色 + 在平台边缘 → 向内侧移动恢复
-                        if self._char_lost_frames >= 5:
-                            edge_dir = self._at_platform_edge()
-                            if edge_dir:
-                                self._edge_recover_dir = edge_dir
-                                self._edge_recover_ticks = 15  # ~0.45s
-                                self.keys.hold_only((edge_dir,))
-                                self._log_error(f"[{self.frame_count:04d}] 边缘遮挡，向{edge_dir}移动恢复")
-                                continue
-                        self.keys.force_release_all()
-                        self._log_error(f"[{self.frame_count:04d}] 角色丢失")
-                        time.sleep(0.2)
-                        continue
-                    cx, cy, _conf = char
-                    self.state.player_screen_x = cx
-                    self.state.player_screen_y = cy
-                    self._char_lost_frames = 0  # 找到角色，重置丢失计数
+                        elif self._char_lost_frames >= 5:
+                            # 有小地图定位 → 只是被宠物名遮挡，不触发边缘恢复/释放按键
+                            mm_valid = (self.state.player_minimap_x != 0
+                                        and now - self._last_perception < 0.5)
+                            if mm_valid:
+                                self._char_lost_frames = 0  # 重置计数，避免后续触发
+                                # 无声跳过，不干扰游戏
+                            else:
+                                edge_dir = self._at_platform_edge()
+                                if edge_dir:
+                                    self._edge_recover_dir = edge_dir
+                                    self._edge_recover_ticks = 15
+                                    self.keys.hold_only((edge_dir,))
+                                    self._log_error(f"[{self.frame_count:04d}] 边缘遮挡，向{edge_dir}移动恢复")
+                                else:
+                                    self.keys.force_release_all()
+                                    self._log_error(f"[{self.frame_count:04d}] 角色丢失")
+                                    time.sleep(0.2)
+                    else:
+                        cx, cy, _conf = char
+                        self.state.player_screen_x = cx
+                        self.state.player_screen_y = cy
+                        self._char_lost_frames = 0
 
+                    # 2) YOLO 怪物检测
                     if now - last_yolo_time >= YOLO_INTERVAL:
                         try:
                             monsters = detect_monsters(self.yolo_model, frame)
@@ -468,6 +518,7 @@ class AutoFarmV2App:
                             self._log_error(f"[{self.frame_count:04d}] YOLO异常: {e}")
                     self.state.monsters = monsters
 
+                    # 3) 小地图定位 + 绳梯检测（独立于角色模板匹配，爬梯时关键）
                     if wm:
                         mm = capture_minimap(target_hwnd, tuple(wm.mm_region))
                         if mm is not None:
@@ -478,6 +529,48 @@ class AutoFarmV2App:
                                 pid = wm.find_platform(dot[0], dot[1])
                                 if pid:
                                     self.state.current_platform = pid
+
+                                # 绳梯检测：连续5帧 x重合且 y在绳梯Y范围内
+                                was_on_rope = self.state.on_rope
+                                if detect_on_rope(wm, dot[0], dot[1]):
+                                    self.state.rope_frames += 1
+                                    if self.state.rope_frames >= 5 and not self.state.on_rope:
+                                        self.state.on_rope = True
+                                else:
+                                    self.state.rope_frames = 0
+                                    self.state.on_rope = False
+                                if self.state.on_rope != was_on_rope:
+                                    if self.state.on_rope:
+                                        self._log_error(f"[{self.frame_count:04d}] 检测到角色在绳梯上 "
+                                                        f"(x={dot[0]:.0f}, y={dot[1]:.0f})")
+                                    else:
+                                        self._log_error(f"[{self.frame_count:04d}] 角色离开绳梯")
+
+                        # 诊断：每2秒输出绳梯检测状态（不受mm=None影响）
+                        if self.frame_count % 60 == 0:
+                            if mm is None:
+                                self._log_error(f"[{self.frame_count:04d}] 绳梯诊断: 小地图截图失败")
+                            elif dot is None:
+                                self._log_error(f"[{self.frame_count:04d}] 绳梯诊断: 黄点未找到 "
+                                                f"(minimap={wm.mm_region})")
+                            elif not self.state.on_rope:
+                                px, py = self.state.player_minimap_x, self.state.player_minimap_y
+                                nearest_rope = ""
+                                nearest_dist = 9999.0
+                                for e in wm.edges:
+                                    if e.get("type") != "rope":
+                                        continue
+                                    rx = float(e.get("top", {}).get("x", 9999))
+                                    ty = float(e.get("top", {}).get("y", 9999))
+                                    by = float(e.get("bottom", {}).get("y", 9999))
+                                    y_min, y_max = sorted([ty, by])
+                                    dx = abs(px - rx)
+                                    if y_min <= py <= y_max and dx < nearest_dist:
+                                        nearest_dist = dx
+                                        nearest_rope = f"x={rx:.0f} y=[{y_min:.0f},{y_max:.0f}]"
+                                self._log_error(f"[{self.frame_count:04d}] 绳梯诊断: 黄点有 "
+                                                f"pos=({px:.0f},{py:.0f})  "
+                                                f"最近绳梯={nearest_rope or '无匹配'} dist={nearest_dist if nearest_dist < 9999 else '-'}")
 
                     self._last_perception = now
 
@@ -506,7 +599,8 @@ class AutoFarmV2App:
                     else:
                         cmd, self._patrol_direction, log_text = decide(
                             self.state, wm, self._patrol_direction,
-                            self._transition_in_progress)
+                            self._transition_in_progress,
+                            self.min_monsters_var.get())
 
                         stuck_cmd = self._check_stuck(now)
                         if stuck_cmd:
@@ -637,6 +731,28 @@ class AutoFarmV2App:
         if self._skill_add_btn:
             self._skill_add_btn.config(state="normal")
 
+    def _build_decision_config(self, parent: tk.Widget) -> None:
+        """构建决策配置面板"""
+        panel = tk.LabelFrame(parent, text="决策配置",
+                               font=("Microsoft YaHei", 10, "bold"),
+                               padx=8, pady=5, fg="#2c3e50")
+        panel.pack(side="top", fill="x", padx=15, pady=(5, 2))
+
+        row = tk.Frame(panel)
+        row.pack(fill="x")
+
+        tk.Label(row, text="身边怪物最少数:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 6))
+
+        spin = tk.Spinbox(row, from_=1, to=20, increment=1, width=5,
+                          textvariable=self.min_monsters_var,
+                          font=("Microsoft YaHei", 10),
+                          justify="center")
+        spin.pack(side="left")
+
+        tk.Label(row, text="  (当前平台怪物数少于此值时切换平台)",
+                 font=("Microsoft YaHei", 8), fg="#888").pack(side="left")
+
     def _read_skill_configs(self) -> None:
         """从 GUI 读取技能配置到 _skill_configs"""
         configs: list[dict] = []
@@ -738,5 +854,12 @@ if __name__ == "__main__":
     except Exception as e:
         import traceback
         err = traceback.format_exc()
+        try:
+            from datetime import datetime
+            log = PROJECT_DIR / "run.log"
+            with open(str(log), "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().strftime('%H:%M:%S')}] [严重异常] {e}\n{err}\n")
+        except Exception:
+            pass
         ctypes.windll.user32.MessageBoxW(0, err, "auto_farm_v2 - 启动失败", 0x10)
         raise

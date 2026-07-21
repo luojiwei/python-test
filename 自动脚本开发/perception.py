@@ -46,7 +46,8 @@ def detect_monsters(model, frame_bgr: np.ndarray) -> list[dict]:
             continue
         for box in r.boxes:
             cls_id = int(box.cls)
-            if cls_id not in config.MONSTER_CLASSES:
+            cls_name = config.CLASS_NAMES.get(cls_id, "")
+            if cls_name in config.NON_MONSTER_NAMES:
                 continue
             conf = float(box.conf)
             xyxy = box.xyxy.tolist()[0]
@@ -102,3 +103,33 @@ class GameState:
     monsters: list[dict] = field(default_factory=list)
     facing: str = "r"
     timestamp: float = 0.0
+    on_rope: bool = False           # 当前是否在绳梯上
+    rope_frames: int = 0            # 连续在绳梯上的帧数
+
+
+# ============================================================
+# 绳梯检测
+# ============================================================
+
+def detect_on_rope(wm, px: float, py: float, x_tolerance: int = 5) -> bool:
+    """检测小地图坐标 (px, py) 是否落在任意绳梯范围内。
+    注意：如果角色同时落在某个平台上（底部/顶部绳梯端点），不算在绳梯上。"""
+    if wm is None:
+        return False
+    # 先检查是否在平台上——在平台上就不算绳梯
+    on_platform = wm.find_platform(px, py) is not None
+    for edge in wm.edges:
+        if edge.get("type") != "rope":
+            continue
+        top = edge.get("top", {})
+        bottom = edge.get("bottom", {})
+        rope_x: float = float(top.get("x", 9999))
+        rope_top_y: float = float(top.get("y", 9999))
+        rope_bot_y: float = float(bottom.get("y", 9999))
+        y_min = min(rope_top_y, rope_bot_y)
+        y_max = max(rope_top_y, rope_bot_y)
+        if abs(px - rope_x) <= x_tolerance and y_min <= py <= y_max:
+            # 绳梯命中，但如果在平台上（绳梯端点附近）则不算
+            if not on_platform:
+                return True
+    return False
