@@ -150,8 +150,10 @@ class ClimbCommand(Command):
             if going_up:
                 if now - self._mount_time > MOUNT_DURATION:
                     self._cstate = "climb"; keys.hold_only(('u',))
-            elif py >= self._target_y - 3:
-                self._cstate = "finish"; self._finish_time = now; keys.release_all()
+            else:
+                # 下梯：按住 d 短暂延迟后进入爬降
+                if now - self._mount_time > 0.3:
+                    self._cstate = "climb"; keys.hold_only(('d',))
 
         elif self._cstate == "climb":
             if going_up:
@@ -166,6 +168,14 @@ class ClimbCommand(Command):
                     self._reached_top_time = 0.0
             else:
                 keys.hold_only(('d',))
+                if py >= self._target_y - 3:  # 下到绳梯底部
+                    if self._reached_top_time == 0.0:
+                        self._reached_top_time = now
+                    elif now - self._reached_top_time > 0.5:
+                        self._cstate = "finish"; self._finish_time = now
+                        keys.release_all()
+                else:
+                    self._reached_top_time = 0.0
 
         elif self._cstate == "finish":
             keys.release_all(); self._finished = True
@@ -208,8 +218,11 @@ class JumpCommand(Command):
                 self._stage = "jump"; self._start_time = now
                 d = 'r' if dx > 0 else 'l'
                 keys.hold_only(('j', d)); time.sleep(0.2); keys.release_all()
+                state.facing = d
             else:
-                keys.hold_only(('r' if dx > 0 else 'l',))
+                d = 'r' if dx > 0 else 'l'
+                keys.hold_only((d,))
+                state.facing = d
 
     def is_finished(self) -> bool:
         return time.time() - self._start_time > self._timeout
@@ -235,6 +248,7 @@ class FlashCommand(Command):
             keys.release_all()
         else:
             keys.hold_only(('r' if dx > 0 else 'l',))
+            state.facing = 'r' if dx > 0 else 'l'
 
     def is_finished(self) -> bool:
         return time.time() - self._start_time > self._timeout

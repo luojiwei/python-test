@@ -113,11 +113,9 @@ class GameState:
 
 def detect_on_rope(wm, px: float, py: float, x_tolerance: int = 5) -> bool:
     """检测小地图坐标 (px, py) 是否落在任意绳梯范围内。
-    注意：如果角色同时落在某个平台上（底部/顶部绳梯端点），不算在绳梯上。"""
+    距绳梯端点 >3px → 算绳梯；距端点 ≤3px 且在平台上 → 不算（站在平台地面）。"""
     if wm is None:
         return False
-    # 先检查是否在平台上——在平台上就不算绳梯
-    on_platform = wm.find_platform(px, py) is not None
     for edge in wm.edges:
         if edge.get("type") != "rope":
             continue
@@ -129,7 +127,78 @@ def detect_on_rope(wm, px: float, py: float, x_tolerance: int = 5) -> bool:
         y_min = min(rope_top_y, rope_bot_y)
         y_max = max(rope_top_y, rope_bot_y)
         if abs(px - rope_x) <= x_tolerance and y_min <= py <= y_max:
-            # 绳梯命中，但如果在平台上（绳梯端点附近）则不算
-            if not on_platform:
-                return True
+            # 距离绳子两端在 3px 以内 → 可能在端点附近的平台上
+            if min(abs(py - y_min), abs(py - y_max)) <= 2:
+                if wm.find_platform(px, py) is not None:
+                    continue  # 站在平台地面，不算绳梯
+            return True
     return False
+
+
+# ============================================================
+# 运行时自校准：小地图 ↔ 屏幕坐标映射
+# ============================================================
+
+class Calibrator:
+    """利用模板匹配成功时的 (mm, screen) 配对数据，训练线性回归。
+    模板失败时用小地图推屏幕坐标，输出置信度。"""
+    def __init__(self, max_samples: int = 50) -> None:
+        self._max = max_samples
+        self._cols: list[tuple[float, float, float, float]] = []  # (mm_x, mm_y, sc_x, sc_y)
+        self._last_update: float = 0.0
+
+    def add(self, mm_x: float, mm_y: float, sc_x: float, sc_y: float) -> None:
+        import time
+        self._cols.append((mm_x, mm_y, sc_x, sc_y))
+        if len(self._cols) > self._max:
+            self._cols.pop(0)
+        self._last_update = time.time()
+
+    def has_data(self) -> bool:
+        return len(self._cols) >= 5
+
+    def _linreg(self, xs: list[float], ys: list[float]) -> tuple[float, float, float]:
+        """返回 (slope, intercept, r2)"""
+        n = len(xs)
+        if n < 2:
+            return 1.0, 0.0, 0.0
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        ss_xy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        ss_xx = sum((x - mx) ** 2 for x in xs)
+        ss_yy = sum((y - my) ** 2 for y in ys)
+        if ss_xx < 1e-6:
+            return 1.0, my, 0.0
+        slope = ss_xy / ss_xx
+        intercept = my - slope * mx
+        r2 = (ss_xy ** 2) / (ss_xx * ss_yy) if ss_yy > 1e-6 else 0.0
+        return slope, intercept, max(0.0, min(1.0, r2))
+
+    def predict(self, mm_x: float, mm_y: float) -> tuple[float, float, float]:
+        """返回 (screen_x, screen_y, confidence)"""
+        import time
+        if not self.has_data():
+            return 0.0, 0.0, 0.0
+
+        xs_mm = [c[0] for c in self._cols]
+        ys_mm = [c[1] for c in self._cols]
+        xs_sc = [c[2] for c in self._cols]
+        ys_sc = [c[3] for c in self._cols]
+
+        sx, ox, r2_x = self._linreg(xs_mm, xs_sc)
+        sy, oy, r2_y = self._linreg(ys_mm, ys_sc)
+
+        screen_x = sx * mm_x + ox
+        screen_y = sy * mm_y + oy
+
+        # 置信度 = R²均值 × 时效衰减
+        r2_avg = (r2_x + r2_y) / 2
+        age = time.time() - self._last_update
+        decay = max(0.0, 1.0 - age / 30.0)  # 30s 线性衰减到 0
+        conf = r2_avg * decay
+
+        # R²过低 → 置信度打折
+        if r2_avg < 0.5:
+            conf *= (r2_avg / 0.5)
+
+        return screen_x, screen_y, conf

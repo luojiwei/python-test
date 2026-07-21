@@ -10,6 +10,11 @@
       "name": "快速箭",
       "key_display": "A",
       "duration": "110"
+    },
+    {
+      "name": "宠物食品",
+      "key_display": "PageDown",
+      "duration": "900"
     }
   ]
 }

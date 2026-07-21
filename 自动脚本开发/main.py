@@ -10,6 +10,7 @@ auto_farm_v2.py — 命令驱动、跨平台自动寻路打怪脚本
 
 import ctypes
 import json
+import random
 import threading
 import time
 import tkinter as tk
@@ -32,9 +33,10 @@ from input_utils import (
 )
 from perception import (
     find_character, detect_monsters, find_yellow_dot, detect_on_rope, GameState,
+    Calibrator,
 )
 from world_model import WorldModel, load_world_model
-from commands import Command, ClimbCommand, MoveToCommand, decide
+from commands import Command, ClimbCommand, decide
 
 
 # ============================================================
@@ -54,6 +56,9 @@ class AutoFarmV2App:
 
         # --- 持久化日志 ---
         self._log_file: str = str(PROJECT_DIR / "run.log")
+
+        # --- 位置校准器 ---
+        self.calib = Calibrator()
         self.frame_count: int = 0
         self.yolo_model = None
         self._patrol_direction: str = "up"
@@ -62,14 +67,9 @@ class AutoFarmV2App:
         self._current_command: Command | None = None
         self._last_logic: float = 0.0
         self._last_perception: float = 0.0
-        self._edge_recover_dir: str | None = None
-        self._edge_recover_ticks: int = 0
         self._char_lost_frames: int = 0       # 连续丢失角色帧数
-        self._stuck_last_x: float = 0.0
-        self._stuck_last_y: float = 0.0
-        self._stuck_monster_count: int = 0
-        self._stuck_since: float = 0.0
-        self._stuck_action_time: float = 0.0
+        self._facing_stuck_since: float = 0.0      # 同朝向持续时间
+        self._facing_last_count: int = 0            # 上次怪物数
         self.state = GameState()
         self.wm: WorldModel | None = None
 
@@ -342,15 +342,15 @@ class AutoFarmV2App:
                 self._log_error(f"[技能] {cfg['name']} 初始释放 (键位:{key})")
                 time.sleep(1.0)
 
-        self.keys.tap('r', duration=0.05)
-        self.state.facing = 'r'
+        init_facing = random.choice(('l', 'r'))
+        self.keys.tap(init_facing, duration=0.05)
+        self.state.facing = init_facing
         time.sleep(0.15)
 
         self.frame_count = 0
         self._patrol_direction = "up"
         self._transition_in_progress = False
         self._current_command = None
-        self._edge_recover_ticks = 0
         self._char_lost_frames = 0
         self._last_logic = time.time()
         self._last_perception = time.time()
@@ -376,26 +376,6 @@ class AutoFarmV2App:
 
     # --- 辅助方法 ---
 
-    def _at_platform_edge(self) -> str | None:
-        """如果角色在平台边缘被遮挡，返回应移动的方向 'l'/'r'，否则 None"""
-        wm = self.wm
-        if wm is None:
-            return None
-        px = self.state.player_minimap_x
-        pid = self.state.current_platform
-        if pid is None:
-            return None
-        for p in wm.platforms:
-            if p["id"] == pid:
-                left = float(p["left_endpoint"]["x"])
-                right = float(p["right_endpoint"]["x"])
-                if abs(px - left) <= 5:
-                    return 'r'
-                if abs(px - right) <= 5:
-                    return 'l'
-                break
-        return None
-
     def _nearby_monster_on_platform(self) -> bool:
         """当前平台是否有在攻击范围内的怪物"""
         cy = self.state.player_screen_y
@@ -407,48 +387,6 @@ class AutoFarmV2App:
                 if dx < ATTACK_DISTANCE and dy < ATTACK_VERTICAL:
                     return True
         return False
-
-    def _check_stuck(self, now: float) -> MoveToCommand | None:
-        """5s内角色没位移且怪物数不变 → 返回强制移动命令，否则 None"""
-        cx = self.state.player_screen_x
-        cy = self.state.player_screen_y
-        mc = len(self.state.monsters)
-
-        moved = (abs(cx - self._stuck_last_x) > 10 or abs(cy - self._stuck_last_y) > 10)
-        monsters_changed = (mc != self._stuck_monster_count)
-
-        if moved or monsters_changed or self._stuck_since == 0.0:
-            self._stuck_last_x = cx
-            self._stuck_last_y = cy
-            self._stuck_monster_count = mc
-            self._stuck_since = now if self._stuck_since == 0.0 else self._stuck_since
-            if moved or monsters_changed:
-                self._stuck_since = now
-            return None
-
-        if now - self._stuck_since < 5.0:
-            return None
-
-        # 卡死，且距离上次强制移动 > 2s
-        if now - self._stuck_action_time < 2.0:
-            return None
-
-        # 找最近的怪物
-        nearest = None
-        nearest_dist = float("inf")
-        for m in self.state.monsters:
-            d = ((m["cx"] - cx) ** 2 + (m["cy"] - cy) ** 2) ** 0.5
-            if d < nearest_dist:
-                nearest_dist = d
-                nearest = m
-
-        if nearest is None:
-            self._stuck_since = now
-            return None
-
-        self._stuck_action_time = now
-        self._log_error(f"卡死检测: 5s未移动，强制走向最近怪物 ({nearest_dist:.0f}px)")
-        return MoveToCommand(nearest["cx"])
 
     # --- 主循环 ---
 
@@ -480,34 +418,31 @@ class AutoFarmV2App:
                     char = find_character(frame, self.template, self.search_region)
                     if char is None:
                         self._char_lost_frames += 1
-                        if self._edge_recover_ticks > 0:
-                            self._edge_recover_ticks -= 1
-                            if self._edge_recover_ticks == 0:
-                                self._edge_recover_dir = None
-                                self.keys.release_all()
-                        elif self._char_lost_frames >= 5:
-                            # 有小地图定位 → 只是被宠物名遮挡，不触发边缘恢复/释放按键
-                            mm_valid = (self.state.player_minimap_x != 0
-                                        and now - self._last_perception < 0.5)
-                            if mm_valid:
-                                self._char_lost_frames = 0  # 重置计数，避免后续触发
-                                # 无声跳过，不干扰游戏
+                        if self._char_lost_frames >= 5:
+                            # 有小地图定位 → 只是被宠物名遮挡，用校准器推算
+                            if self.state.player_minimap_x != 0:
+                                self._char_lost_frames = 0
+                                if self.calib.has_data():
+                                    px, py, pred_conf = self.calib.predict(
+                                        self.state.player_minimap_x,
+                                        self.state.player_minimap_y)
+                                    if pred_conf > 0.3:
+                                        self.state.player_screen_x = px
+                                        self.state.player_screen_y = py
                             else:
-                                edge_dir = self._at_platform_edge()
-                                if edge_dir:
-                                    self._edge_recover_dir = edge_dir
-                                    self._edge_recover_ticks = 15
-                                    self.keys.hold_only((edge_dir,))
-                                    self._log_error(f"[{self.frame_count:04d}] 边缘遮挡，向{edge_dir}移动恢复")
-                                else:
-                                    self.keys.force_release_all()
-                                    self._log_error(f"[{self.frame_count:04d}] 角色丢失")
-                                    time.sleep(0.2)
+                                self.keys.force_release_all()
+                                self._log_error(f"[{self.frame_count:04d}] 角色丢失(小地图无信号)")
+                                time.sleep(0.2)
                     else:
-                        cx, cy, _conf = char
+                        cx, cy, conf = char
                         self.state.player_screen_x = cx
                         self.state.player_screen_y = cy
                         self._char_lost_frames = 0
+                        # 喂校准器：模板成功时记录 (mm, screen) 配对
+                        if conf > 0.55 and self.state.player_minimap_x != 0:
+                            self.calib.add(self.state.player_minimap_x,
+                                           self.state.player_minimap_y,
+                                           cx, cy)
 
                     # 2) YOLO 怪物检测
                     if now - last_yolo_time >= YOLO_INTERVAL:
@@ -586,9 +521,8 @@ class AutoFarmV2App:
                         if finished or off_rope:
                             self._current_command = None
                             self._transition_in_progress = False
-                            self._stuck_since = now
-                            self.state.facing = 'r'
-                            self.keys.tap('r', duration=0.05)
+                            self.state.facing = random.choice(('l', 'r'))
+                            self.keys.tap(self.state.facing, duration=0.05)
                             self._log_error("到达目标平台，重置朝向↗，重新决策")
                         elif (isinstance(self._current_command, ClimbCommand)
                               and not self._current_command.is_on_rope(self.state.player_minimap_y)
@@ -602,11 +536,6 @@ class AutoFarmV2App:
                             self._transition_in_progress,
                             self.min_monsters_var.get())
 
-                        stuck_cmd = self._check_stuck(now)
-                        if stuck_cmd:
-                            cmd = stuck_cmd
-                            log_text += "\n动作: 强制移动(卡死检测)"
-
                         if cmd is not None:
                             self._current_command = cmd
                             if cmd.is_transition():
@@ -614,6 +543,20 @@ class AutoFarmV2App:
                                 self._transition_start_time = now
                         self._log_decision(log_text)
                     self._last_logic = now
+
+                    # 朝向僵死检测：同朝向5s怪物数未减少 → 重按朝向键唤醒
+                    facing_now = self.state.facing
+                    mc_now = len(self.state.monsters)
+                    if self._facing_stuck_since == 0.0 or mc_now < self._facing_last_count:
+                        self._facing_stuck_since = now
+                        self._facing_last_count = mc_now
+                    elif now - self._facing_stuck_since > 5.0 and facing_now in ('l', 'r'):
+                        self._facing_stuck_since = now
+                        self.keys.tap(facing_now, duration=0.05)
+                        time.sleep(0.06)
+                        self.keys.tap('a', duration=0.03)
+                        self._log_error(f"朝向僵死检测: 5s同朝向({facing_now})怪物未减({mc_now}只)，重按{facing_now}+攻击校准")
+                        self.state.facing = facing_now
 
                 # ---- 执行 (每 tick) ----
                 if self._current_command and wm:
@@ -783,10 +726,13 @@ class AutoFarmV2App:
             last = self._skill_last_cast.get(i, 0.0)
 
             if now - last >= interval:
+                # 先释放所有正在按的键，确保技能按键不被冲突吃掉的
+                self.keys.release_all()
+                time.sleep(0.15)
                 self.keys.tap(key, duration=0.05)
                 self._skill_last_cast[i] = now
                 self._log_error(f"[技能] {cfg['name']} 释放 (键位:{key}, 间隔:{interval:.0f}s)")
-                time.sleep(1.0)
+                time.sleep(0.3)  # 给游戏一点时间处理技能动画
 
     def _build_footer(self, parent: tk.Widget) -> None:
         """构建底部 footer：游戏窗口、地图选择、开始按钮、状态"""
