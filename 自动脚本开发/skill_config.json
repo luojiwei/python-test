@@ -1,0 +1,15 @@
+{
+  "map": "魔法密林南郊",
+  "skills": [
+    {
+      "name": "无形箭",
+      "key_display": "PageUp",
+      "duration": "240"
+    },
+    {
+      "name": "快速箭",
+      "key_display": "A",
+      "duration": "110"
+    }
+  ]
+}

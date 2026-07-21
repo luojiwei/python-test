@@ -1,0 +1,16 @@
+# YOLO 数据集配置文件 — 由 YOLO训练工具 自动生成
+
+path: D:\Program Files (x86)\Tencent\WorkBuddy\脚本开发工具\YOLO训练工具\dataset
+train: images/train
+val: images/val
+
+nc: 7
+
+names:
+  - 绿水灵
+  - 木妖
+  - 绿蘑菇
+  - 绳子下
+  - 绳子上
+  - 梯子下
+  - 梯子上
