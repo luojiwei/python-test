@@ -10,6 +10,8 @@
   5. 为每个平台记录出口列表（绳梯 / 传送点），标注在小地图上的位置
 """
 
+from edge_types import EdgeType
+
 import json
 import sys
 from pathlib import Path
@@ -215,14 +217,14 @@ def compute_jump_edges(
 
         # 双向
         edges.append({
-            "type": "jump",
+            "type": EdgeType.JUMP,
             "from_platform": plat_from,
             "to_platform": plat_to,
             "from": {"x": fx, "y": fy},
             "to": {"x": tx, "y": ty},
         })
         edges.append({
-            "type": "jump",
+            "type": EdgeType.JUMP,
             "from_platform": plat_to,
             "to_platform": plat_from,
             "from": {"x": tx, "y": ty},
@@ -258,7 +260,7 @@ def compute_flash_edges(
             continue
 
         edges.append({
-            "type": "flash",
+            "type": EdgeType.FLASH,
             "from_platform": plat_from,
             "to_platform": plat_to,
             "flash_type": flash_type,
@@ -268,7 +270,7 @@ def compute_flash_edges(
 
         if flash_type == "two_way":
             edges.append({
-                "type": "flash",
+                "type": EdgeType.FLASH,
                 "from_platform": plat_to,
                 "to_platform": plat_from,
                 "flash_type": flash_type,
@@ -301,13 +303,13 @@ def build_adjacency(
         src = edge["from_platform"]
         adjacency[src].append(edge)
 
-        if edge["type"] == "rope":
+        if edge["type"] == EdgeType.ROPE:
             exits[src]["ropes"].append({
                 "direction": edge["direction"],
                 "minimap_x": edge["minimap_x"],
                 "target_platform": edge["to_platform"],
             })
-        elif edge["type"] == "jump":
+        elif edge["type"] == EdgeType.JUMP:
             exits[src]["jumps"].append({
                 "from": edge["from"],
                 "to": edge["to"],
@@ -388,9 +390,9 @@ def build_world_model(maps_path: str, output_path: str, map_name: str | None = N
         else:
             for n in neighbors:
                 detail = ""
-                if n["type"] == "rope":
+                if n["type"] == EdgeType.ROPE:
                     detail = f":{n['direction']}"
-                elif n["type"] == "flash":
+                elif n["type"] == EdgeType.FLASH:
                     detail = f":{n['flash_type']}"
                 print(f"  {pid} --[{n['type']}{detail}]--> {n['to_platform']}")
 

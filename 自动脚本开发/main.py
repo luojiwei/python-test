@@ -23,86 +23,28 @@ import numpy as np
 import config
 from config import (
     PROJECT_DIR, WINDOW_TITLE,
-    YOLO_INTERVAL, PERCEPTION_INTERVAL, TICK_INTERVAL, LOGIC_INTERVAL,
-    SEARCH_BOTTOM_SKIP_PCT, ATTACK_DISTANCE, ATTACK_VERTICAL, PLATFORM_TOLERANCE,
-    SKILL_KEY_CHOICES, SKILL_KEY_LOOKUP, SKILL_SAFETY_MARGIN,
-    discover_maps, validate_map_resources,
+    PERCEPTION_INTERVAL, TICK_INTERVAL, LOGIC_INTERVAL,
+    ATTACK_DISTANCE, ATTACK_VERTICAL, PLATFORM_TOLERANCE,
+    discover_maps,
 )
 from input_utils import (
-    KeySender, find_window_by_title, force_foreground,
-    capture_frame, capture_minimap,
+    KeySender, find_window_by_title, capture_frame,
 )
 from perception import (
-    find_character, detect_monsters, find_yellow_dot, detect_on_rope, GameState,
-    Calibrator,
+    GameState, Calibrator,
 )
-from world_model import WorldModel, load_world_model
+from world_model import WorldModel
 from commands import Command, ClimbCommand, decide
+from key_actions import KeyActionManager
+from map_loader import MapLoader
+from perception_pipeline import PerceptionPipeline
+from skill_manager import SkillManager
+from transition import TransitionController
 
 
 # ============================================================
 # 巡逻路线解析
 # ============================================================
-
-def _load_patrol_routes(map_name: str,
-                         markers_path: Path) -> tuple[list[str], list[list[tuple[float, float]]]]:
-    """从本地 markers.json 加载巡逻路线并解析为坐标。"""
-    if not markers_path.exists():
-        return [], []
-    try:
-        with open(markers_path, "r", encoding="utf-8") as f:
-            md = json.load(f)
-        mc = md.get(map_name, {}) if isinstance(md, dict) else {}
-        routes = mc.get("patrol_routes", [])
-        raw_platforms = mc.get("platforms", [])
-        raw_ropes = mc.get("ropes", [])
-        raw_jumps = mc.get("jumps", [])
-        raw_flashes = mc.get("flash_points", [])
-    except Exception:
-        return [], []
-
-    if not routes or not raw_platforms:
-        return [], []
-
-    # 构建锚点坐标映射
-    anchor_map: dict[str, tuple[float, float]] = {}
-    sorted_plats: list[dict] = []
-    for i, p in enumerate(raw_platforms):
-        np = dict(p); np["_idx"] = i; sorted_plats.append(np)
-    sorted_plats.sort(key=lambda p: p["avg_y"], reverse=True)
-    for i, p in enumerate(sorted_plats):
-        le = p["left_endpoint"]; re = p["right_endpoint"]
-        anchor_map[f"plat_{i}_L"] = (float(le["x"]), float(le["y"]))
-        anchor_map[f"plat_{i}_R"] = (float(re["x"]), float(re["y"]))
-
-    for i, r in enumerate(raw_ropes):
-        tx, ty = r["top"]["x"], r["top"]["y"]
-        bx, by = r["bottom"]["x"], r["bottom"]["y"]
-        anchor_map[f"rope_{i}"] = ((tx + bx) / 2, (ty + by) / 2)
-
-    for i, j in enumerate(raw_jumps):
-        fx, fy = j["from"]["x"], j["from"]["y"]
-        tx, ty = j["to"]["x"], j["to"]["y"]
-        anchor_map[f"jump_{i}"] = ((fx + tx) / 2, (fy + ty) / 2)
-
-    for i, fl in enumerate(raw_flashes):
-        fx, fy = fl["from"]["x"], fl["from"]["y"]
-        tx, ty = fl["to"]["x"], fl["to"]["y"]
-        anchor_map[f"flash_{i}"] = ((fx + tx) / 2, (fy + ty) / 2)
-
-    names: list[str] = []
-    all_coords: list[list[tuple[float, float]]] = []
-    for route in routes:
-        name = route.get("route_name", "未命名路线")
-        coords: list[tuple[float, float]] = []
-        for wid in route.get("waypoints", []):
-            pt = anchor_map.get(wid)
-            if pt:
-                coords.append(pt)
-        if coords:
-            names.append(name)
-            all_coords.append(coords)
-    return names, all_coords
 
 
 
@@ -120,6 +62,14 @@ class AutoFarmV2App:
         self.search_region: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.keys = KeySender()
         self.keys.set_log_callback(self._on_key)
+        self.state = GameState()
+        self.actions = KeyActionManager(self.keys, self.state, self._log_key_action)
+
+        # --- 模块化组件 ---
+        self.loader = MapLoader(
+            status_cb=self._update_status, log_cb=self._log_error)
+        self.skills = SkillManager(log_cb=self._log_error)
+        # actions / perception / transition 在 start() 中延时初始化
 
         # --- 持久化日志 ---
         self._log_file: str = str(PROJECT_DIR / "run.log")
@@ -134,18 +84,9 @@ class AutoFarmV2App:
         self._current_command: Command | None = None
         self._last_logic: float = 0.0
         self._last_perception: float = 0.0
-        self._char_lost_frames: int = 0       # 连续丢失角色帧数
         self._facing_stuck_since: float = 0.0      # 同朝向持续时间
         self._facing_last_count: int = 0            # 上次怪物数
-        self.state = GameState()
         self.wm: WorldModel | None = None
-
-        # --- 技能状态 ---
-        self._skill_rows: list[dict] = []         # 每行的 widget 引用
-        self._skill_configs: list[dict] = []      # 运行时配置快照
-        self._skill_last_cast: dict[int, float] = {}  # row_index -> 上次释放时间
-        self._skill_add_btn: tk.Button | None = None
-        self._skill_cols: list[tk.Frame] = []     # 两列的容器
 
         # --- 决策配置 ---
         self.min_monsters_var = tk.IntVar(value=3)
@@ -181,21 +122,18 @@ class AutoFarmV2App:
         # ========================
 
         # --- 顶部：技能面板 ---
-        self._build_skill_panel(config_tab)
+        self.skills.build_panel(config_tab)
 
         # 尝试加载缓存配置
         cache_path = PROJECT_DIR / "skill_config.json"
-        cached_skills: list[dict] = []
+        cached_skills = SkillManager.load_cached_skills()
         cached_map: str = ""
         cached_decision: dict = {}
         if cache_path.exists():
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
                     cache_data = json.load(f)
-                if isinstance(cache_data, list):
-                    cached_skills = cache_data
-                else:
-                    cached_skills = cache_data.get("skills", [])
+                if isinstance(cache_data, dict):
                     cached_map = cache_data.get("map", "")
                     cached_decision = {
                         "patrol_mode": cache_data.get("patrol_mode", "auto_hunt"),
@@ -207,15 +145,15 @@ class AutoFarmV2App:
 
         if cached_skills:
             for item in cached_skills:
-                self._add_skill_row(
+                self.skills.add_row(
                     name=item.get("name", ""),
                     key_display=item.get("key_display", "PageUp"),
                     duration=str(item.get("duration", "")),
                     enabled=item.get("enabled", True),
                 )
         else:
-            self._add_skill_row()  # 默认左列
-            self._add_skill_row()  # 默认右列
+            self.skills.add_row()  # 默认左列
+            self.skills.add_row()  # 默认右列
 
         # --- 决策配置 ---
         self._build_decision_config(config_tab)
@@ -315,6 +253,10 @@ class AutoFarmV2App:
             self._last_key_logged = now
             self._log_error(f"[按键] {key}")
 
+    def _log_key_action(self, msg: str) -> None:
+        """KeyActionManager 的语义化动作日志。"""
+        self._log_error(f"[动作] {msg}")
+
     def toggle(self) -> None:
         if not self.running:
             self.start()
@@ -336,148 +278,75 @@ class AutoFarmV2App:
             self._update_status("请选择有效地图")
             return
 
-        missing = validate_map_resources(map_name)
-        if missing:
-            msg = f"地图 [{map_name}] 缺少以下文件:\n\n" + "\n".join(f"  • {m}" for m in missing)
-            msg += f"\n\n请确保 maps/{map_name}/ 目录下包含所需资源。"
-            messagebox.showerror("资源缺失", msg)
-            return
-
-        map_dir = PROJECT_DIR / "maps" / map_name
-        wm_path = str(map_dir / "world_model.json")
-        yolo_path = str(map_dir / "best.pt")
-        config_path = map_dir / "config.json"
-
-        with open(config_path, "r", encoding="utf-8") as f:
-            map_cfg = json.load(f)
-
-        template_rect = tuple(map_cfg.get("template_rect", [85, 728, 150, 745]))
-        mm_region = tuple(map_cfg.get("mm_region", [8, 97, 128, 208]))
-
-        self._update_status(f"加载世界模型 [{map_name}]...")
+        selected_route = self._route_dropdown_var.get()
         try:
-            self.wm = load_world_model(wm_path)
-            self.wm.mm_region = list(mm_region)
+            route_idx = self._patrol_route_names.index(selected_route) if selected_route else 0
+        except (ValueError, IndexError):
+            route_idx = 0
+
+        try:
+            result = self.loader.load(map_name, self.target_hwnd, default_route_idx=route_idx)
+        except FileNotFoundError as e:
+            messagebox.showerror("资源缺失", str(e))
+            return
         except Exception as e:
-            messagebox.showerror("加载失败", f"无法加载世界模型:\n{wm_path}\n\n{e}")
+            messagebox.showerror("加载失败", str(e))
             return
-        self._log_error(f"世界模型: {len(self.wm.platforms)} 平台, {len(self.wm.edges)} 边")
 
-        # 加载巡逻路线（从本地 markers.json）
-        self._patrol_waypoints: list[tuple[float, float]] = []
-        self._patrol_route_names: list[str] = []
-        self._patrol_all_routes: list[list[tuple[float, float]]] = []
-        try:
-            markers_path = map_dir / "markers.json"
-            self._patrol_route_names, self._patrol_all_routes = _load_patrol_routes(
-                map_name, markers_path)
-            # 默认选择第一条路线
-            if self._patrol_all_routes:
-                self._patrol_waypoints = self._patrol_all_routes[0]
-                self._log_error(f"巡逻路线: {len(self._patrol_route_names)}条, "
-                                f"默认 '{self._patrol_route_names[0]}' ({len(self._patrol_waypoints)}途经点)")
-        except Exception as e:
-            self._log_error(f"巡逻路线加载失败: {e}")
+        # 写入实例变量
+        self.wm = result.world_model
+        self.yolo_model = result.yolo_model
+        self.template = result.template
+        self.search_region = result.search_region
+        self._patrol_route_names = result.patrol_route_names
+        self._patrol_all_routes = result.patrol_all_routes
+        self._patrol_waypoints = result.patrol_waypoints
 
-        self._update_status("加载 YOLO 模型...")
-        from ultralytics import YOLO
-        try:
-            self.yolo_model = YOLO(yolo_path)
-        except Exception as e:
-            messagebox.showerror("加载失败", f"无法加载 YOLO 模型:\n{yolo_path}\n\n{e}")
-            return
-        if hasattr(self.yolo_model, 'names'):
-            config.CLASS_NAMES.clear(); config.CLASS_NAMES.update(self.yolo_model.names)
-        elif hasattr(self.yolo_model.model, 'names'):
-            config.CLASS_NAMES.clear(); config.CLASS_NAMES.update(self.yolo_model.model.names)
-        self._log_error(f"YOLO: {len(config.CLASS_NAMES)}类  黑名单={config.NON_MONSTER_NAMES}")
+        # 延时初始化依赖资源的组件
+        self.skills.actions = self.actions
+        self.perception = PerceptionPipeline(
+            self.calib, self.template, self.search_region,
+            self.yolo_model, self.wm, self.actions,
+            log_cb=self._log_error)
+        self.transition = TransitionController(
+            self.actions,
+            log_cb=self._log_error,
+            nearby_monster_check=self._nearby_monster_on_platform)
 
-        self._update_status("截取角色名模板...")
-        try:
-            force_foreground(self.target_hwnd)
-        except Exception:
-            pass
-        time.sleep(0.4)
-        frame = capture_frame(self.target_hwnd)
-        if frame is None:
-            self._update_status("截图失败")
-            return
-        tx, ty, tr, tb = template_rect
-        self.template = frame[ty:tb, tx:tr]
-        frame_h, frame_w = frame.shape[:2]
-        skip_px = int(frame_h * SEARCH_BOTTOM_SKIP_PCT)
-        self.search_region = (0, 0, frame_w, frame_h - skip_px)
-        self._log_error(f"模板: ({tx},{ty})->({tr},{tb})  skip={skip_px}px")
-
-        try:
-            force_foreground(self.target_hwnd)
-        except Exception:
-            pass
-        time.sleep(0.3)
-
-        # 读取技能配置并重置计时器
-        self._read_skill_configs()
-        self._skill_last_cast.clear()
-        self._log_error(f"[技能] 共加载 {len(self._skill_configs)} 个配置:")
-        for i, cfg in enumerate(self._skill_configs):
+        # 读取技能配置
+        self.skills.read_configs()
+        self.skills.reset_timers()
+        self._log_error(f"[技能] 共加载 {len(self.skills.configs)} 个配置:")
+        for i, cfg in enumerate(self.skills.configs):
             self._log_error(f"  #{i} 名称={cfg['name']} 键位={cfg['key']} 持续={cfg['duration']}s")
 
-        # 保存技能配置 + 决策配置 + 地图到缓存
-        cache_data = {
-            "map": self.map_var.get(),
-            "skills": [],
-            "patrol_mode": self.patrol_mode_var.get(),
-            "route_name": self._route_dropdown_var.get(),
-            "min_monsters": self.min_monsters_var.get(),
-        }
-        for row in self._skill_rows:
-            cache_data["skills"].append({
-                "name": row["name_var"].get(),
-                "key_display": row["key_var"].get(),
-                "duration": row["dur_var"].get(),
-                "enabled": row["enabled_var"].get(),
-            })
-        try:
-            with open(PROJECT_DIR / "skill_config.json", "w", encoding="utf-8") as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        # 保存缓存
+        self.skills.save_cache(
+            map_name, self.patrol_mode_var.get(),
+            self._route_dropdown_var.get(), self.min_monsters_var.get())
 
-        # 启动时释放所有有效技能一次（有键位即释放）
-        start_now = time.time()
-        for i, cfg in enumerate(self._skill_configs):
-            key = cfg.get("key", "")
-            if key:
-                self.keys.tap(key, duration=0.05)
-                self._skill_last_cast[i] = start_now
-                self._log_error(f"[技能] {cfg['name']} 初始释放 (键位:{key})")
-                time.sleep(1.0)
+        # 启动时释放技能
+        self.skills.initial_cast()
 
-        init_facing = random.choice(('l', 'r'))
-        self.keys.tap(init_facing, duration=0.05)
-        self.state.facing = init_facing
-        time.sleep(0.15)
+        # 初始化朝向
+        self.actions.turn(random.choice(('l', 'r')))
 
         self.frame_count = 0
         self._patrol_direction = "up"
-        self._transition_in_progress = False
+        self.transition.reset()
         self._current_command = None
         self._current_waypoint_idx = 0
-        # 根据下拉框选择设置当前路线
-        selected_route_name = self._route_dropdown_var.get()
-        if selected_route_name and self._patrol_route_names:
-            try:
-                idx = self._patrol_route_names.index(selected_route_name)
-                self._patrol_waypoints = self._patrol_all_routes[idx]
-            except (ValueError, IndexError):
-                if self._patrol_all_routes:
-                    self._patrol_waypoints = self._patrol_all_routes[0]
-        self._char_lost_frames = 0
         self._last_logic = time.time()
         self._last_perception = time.time()
         self.running = True
         self.btn.config(text="停止打怪", bg="#95a5a6", activebackground="#7f8c8d")
         self._update_status("运行中...")
+        # 清空上次运行日志
+        try:
+            with open(self._log_file, "w", encoding="utf-8") as _:
+                pass
+        except Exception:
+            pass
         self._log_error("=== 自动打怪 v2 启动 ===")
 
         self.thread = threading.Thread(target=self._loop, daemon=True)
@@ -487,8 +356,8 @@ class AutoFarmV2App:
 
     def stop(self) -> None:
         self.running = False
-        self.keys.force_release_all()
-        self._skill_last_cast.clear()
+        self.actions.force_release_all()
+        self.skills.reset_timers()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=3)
         self.btn.config(text="开始打怪", bg="#e74c3c", activebackground="#c0392b")
@@ -512,8 +381,6 @@ class AutoFarmV2App:
     # --- 主循环 ---
 
     def _loop(self) -> None:
-        last_yolo_time: float = 0.0
-        monsters: list[dict] = []
         target_hwnd = self.target_hwnd
         wm = self.wm
 
@@ -535,127 +402,25 @@ class AutoFarmV2App:
 
                 # ---- 感知 ----
                 if now - self._last_perception >= PERCEPTION_INTERVAL:
-                    # 1) 角色屏幕定位（模板匹配，宠物名遮挡时可能失败）
-                    char = find_character(frame, self.template, self.search_region)
-                    if char is None:
-                        self._char_lost_frames += 1
-                        if self._char_lost_frames >= 5:
-                            # 有小地图定位 → 只是被宠物名遮挡，用校准器推算
-                            if self.state.player_minimap_x != 0:
-                                self._char_lost_frames = 0
-                                if self.calib.has_data():
-                                    px, py, pred_conf = self.calib.predict(
-                                        self.state.player_minimap_x,
-                                        self.state.player_minimap_y)
-                                    if pred_conf > 0.3:
-                                        self.state.player_screen_x = px
-                                        self.state.player_screen_y = py
-                            else:
-                                self.keys.force_release_all()
-                                self._log_error(f"[{self.frame_count:04d}] 角色丢失(小地图无信号)")
-                                time.sleep(0.2)
-                    else:
-                        cx, cy, conf = char
-                        self.state.player_screen_x = cx
-                        self.state.player_screen_y = cy
-                        self._char_lost_frames = 0
-                        # 喂校准器：模板成功时记录 (mm, screen) 配对
-                        if conf > 0.55 and self.state.player_minimap_x != 0:
-                            self.calib.add(self.state.player_minimap_x,
-                                           self.state.player_minimap_y,
-                                           cx, cy)
-
-                    # 2) YOLO 怪物检测
-                    if now - last_yolo_time >= YOLO_INTERVAL:
-                        try:
-                            monsters = detect_monsters(self.yolo_model, frame)
-                            last_yolo_time = now
-                        except Exception as e:
-                            self._log_error(f"[{self.frame_count:04d}] YOLO异常: {e}")
-                    self.state.monsters = monsters
-
-                    # 3) 小地图定位 + 绳梯检测（独立于角色模板匹配，爬梯时关键）
-                    if wm:
-                        mm = capture_minimap(target_hwnd, tuple(wm.mm_region))
-                        if mm is not None:
-                            dot = find_yellow_dot(mm)
-                            if dot is not None:
-                                self.state.player_minimap_x = dot[0]
-                                self.state.player_minimap_y = dot[1]
-                                pid = wm.find_platform(dot[0], dot[1])
-                                if pid:
-                                    self.state.current_platform = pid
-
-                                # 绳梯检测：连续5帧 x重合且 y在绳梯Y范围内
-                                was_on_rope = self.state.on_rope
-                                if detect_on_rope(wm, dot[0], dot[1]):
-                                    self.state.rope_frames += 1
-                                    if self.state.rope_frames >= 5 and not self.state.on_rope:
-                                        self.state.on_rope = True
-                                else:
-                                    self.state.rope_frames = 0
-                                    self.state.on_rope = False
-                                if self.state.on_rope != was_on_rope:
-                                    if self.state.on_rope:
-                                        self._log_error(f"[{self.frame_count:04d}] 检测到角色在绳梯上 "
-                                                        f"(x={dot[0]:.0f}, y={dot[1]:.0f})")
-                                    else:
-                                        self._log_error(f"[{self.frame_count:04d}] 角色离开绳梯")
-
-                        # 诊断：每2秒输出绳梯检测状态（不受mm=None影响）
-                        if self.frame_count % 60 == 0:
-                            if mm is None:
-                                self._log_error(f"[{self.frame_count:04d}] 绳梯诊断: 小地图截图失败")
-                            elif dot is None:
-                                self._log_error(f"[{self.frame_count:04d}] 绳梯诊断: 黄点未找到 "
-                                                f"(minimap={wm.mm_region})")
-                            elif not self.state.on_rope:
-                                px, py = self.state.player_minimap_x, self.state.player_minimap_y
-                                nearest_rope = ""
-                                nearest_dist = 9999.0
-                                for e in wm.edges:
-                                    if e.get("type") != "rope":
-                                        continue
-                                    rx = float(e.get("top", {}).get("x", 9999))
-                                    ty = float(e.get("top", {}).get("y", 9999))
-                                    by = float(e.get("bottom", {}).get("y", 9999))
-                                    y_min, y_max = sorted([ty, by])
-                                    dx = abs(px - rx)
-                                    if y_min <= py <= y_max and dx < nearest_dist:
-                                        nearest_dist = dx
-                                        nearest_rope = f"x={rx:.0f} y=[{y_min:.0f},{y_max:.0f}]"
-                                self._log_error(f"[{self.frame_count:04d}] 绳梯诊断: 黄点有 "
-                                                f"pos=({px:.0f},{py:.0f})  "
-                                                f"最近绳梯={nearest_rope or '无匹配'} dist={nearest_dist if nearest_dist < 9999 else '-'}")
-
+                    self.perception.perceive(frame, self.state, target_hwnd, self.frame_count)
                     self._last_perception = now
 
                 # ---- 技能计时器 ----
-                self._process_skills(now)
+                self.skills.process(now)
 
-                # ---- 决策 (自动寻怪 1s / 固定路线 0.3s) ----
+                # ---- 决策 ----
                 logic_interval = 0.3 if self.patrol_mode_var.get() == "fixed_route" else LOGIC_INTERVAL
                 if now - self._last_logic >= logic_interval and wm:
-                    if self._transition_in_progress:
-                        finished = self._current_command and self._current_command.is_finished()
-                        off_rope = (isinstance(self._current_command, ClimbCommand)
-                                    and not self._current_command.is_on_rope(self.state.player_minimap_y))
-                        if finished or off_rope:
+                    if self.transition.in_progress:
+                        tr = self.transition.check(
+                            self._current_command, self.state.player_minimap_y, now)
+                        if tr.action in ("complete", "interrupt"):
                             self._current_command = None
-                            self._transition_in_progress = False
-                            self.state.facing = random.choice(('l', 'r'))
-                            self.keys.tap(self.state.facing, duration=0.05)
-                            self._log_error("到达目标平台，重置朝向↗，重新决策")
-                        elif (isinstance(self._current_command, ClimbCommand)
-                              and not self._current_command.is_on_rope(self.state.player_minimap_y)
-                              and self._nearby_monster_on_platform()):
-                            self._current_command = None
-                            self._transition_in_progress = False
-                            self._log_error("发现近身怪物，中断上梯优先清怪")
+                            self._log_error(tr.log_message)
                     else:
                         cmd, self._patrol_direction, self._current_waypoint_idx, log_text = decide(
                             self.state, wm, self._patrol_direction,
-                            self._transition_in_progress,
+                            self.transition.in_progress,
                             self.min_monsters_var.get(),
                             patrol_mode=self.patrol_mode_var.get(),
                             patrol_waypoints=self._patrol_waypoints,
@@ -664,14 +429,12 @@ class AutoFarmV2App:
                         if cmd is not None:
                             self._current_command = cmd
                             if cmd.is_transition():
-                                self._transition_in_progress = True
-                                self._transition_start_time = now
+                                self.transition.begin(now)
                         self._log_decision(log_text)
                     self._last_logic = now
 
-                    # 朝向僵死检测：同平台同朝向有怪时5s怪物数未减少 → 重按朝向键唤醒
+                    # 朝向僵死检测
                     facing_now = self.state.facing
-                    # 只统计同平台且同朝向的怪物
                     same_plat_same_dir = [m for m in self.state.monsters
                         if abs(m["y2"] - self.state.player_screen_y) <= PLATFORM_TOLERANCE
                         and ((m["cx"] - self.state.player_screen_x >= 0) == (facing_now == 'r'))]
@@ -681,21 +444,18 @@ class AutoFarmV2App:
                         self._facing_last_count = mc_now
                     elif now - self._facing_stuck_since > 5.0 and facing_now in ('l', 'r'):
                         self._facing_stuck_since = now
-                        self.keys.tap(facing_now, duration=0.05)
-                        time.sleep(0.06)
-                        self.keys.tap('a', duration=0.03)
+                        self.actions.wake_up()
                         self._log_error(f"朝向僵死检测: 5s同朝向({facing_now})怪物未减({mc_now}只)，重按{facing_now}+攻击校准")
-                        self.state.facing = facing_now
 
                 # ---- 执行 (每 tick) ----
                 if self._current_command and wm:
-                    self._current_command.execute_tick(self.keys, self.state, wm)
+                    self._current_command.execute_tick(self.actions, self.state, wm)
 
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
                 self._log_error(f"[严重异常] {e}\n{tb}")
-                self.keys.force_release_all()
+                self.actions.force_release_all()
                 time.sleep(0.5)
 
             elapsed = time.time() - t0
@@ -703,112 +463,9 @@ class AutoFarmV2App:
             if sleep_t > 0:
                 time.sleep(sleep_t)
 
-        self.keys.force_release_all()
+        self.actions.force_release_all()
 
     # --- 技能面板 & 计时器 ---
-
-    def _build_skill_panel(self, parent: tk.Widget) -> None:
-        """构建 2 列布局的自动技能面板"""
-        # ttk 样式：缩小 Combobox 字体
-        style = ttk.Style()
-        style.configure("SkillCombo.TCombobox", font=("Microsoft YaHei", 8))
-
-        panel = tk.LabelFrame(parent, text="自动技能",
-                               font=("Microsoft YaHei", 10, "bold"),
-                               padx=8, pady=5, fg="#2c3e50")
-        panel.pack(side="top", fill="x", padx=15, pady=(8, 2))
-
-        # 两列容器
-        cols_frame = tk.Frame(panel)
-        cols_frame.pack(fill="x")
-        self._skill_cols = [tk.Frame(cols_frame), tk.Frame(cols_frame)]
-        self._skill_cols[0].pack(side="left", fill="x", expand=True, anchor="n")
-        self._skill_cols[1].pack(side="left", fill="x", expand=True, anchor="n")
-
-        # 每列的小表头
-        for col in self._skill_cols:
-            hdr = tk.Frame(col)
-            tk.Label(hdr, text="✓", width=2,
-                     font=("Microsoft YaHei", 8, "bold")).pack(side="left")
-            tk.Label(hdr, text="技能名称", width=10, anchor="w",
-                     font=("Microsoft YaHei", 8, "bold")).pack(side="left", padx=2)
-            tk.Label(hdr, text="键位", width=7,
-                     font=("Microsoft YaHei", 8, "bold")).pack(side="left", padx=2)
-            tk.Label(hdr, text="持续(秒)", width=8,
-                     font=("Microsoft YaHei", 8, "bold")).pack(side="left", padx=2)
-            hdr.pack(anchor="w", pady=(0, 2))
-
-        # 添加按钮
-        btn_frame = tk.Frame(panel)
-        self._skill_add_btn = tk.Button(btn_frame, text="+ 添加技能",
-                                        font=("Microsoft YaHei", 8),
-                                        command=self._add_skill_row)
-        self._skill_add_btn.pack(side="left")
-        tk.Label(btn_frame, text="  最多10个",
-                 font=("Microsoft YaHei", 7), fg="#999").pack(side="left")
-        btn_frame.pack(anchor="w", pady=(4, 0))
-
-    def _add_skill_row(self, name: str = "", key_display: str = "PageUp",
-                       duration: str = "", enabled: bool = True) -> None:
-        """添加一行技能配置（左右交替：1→左，2→右，3→左，4→右 ...）"""
-        if len(self._skill_rows) >= 10:
-            return
-
-        col_idx = len(self._skill_rows) % 2
-        parent = self._skill_cols[col_idx]
-
-        row_frame = tk.Frame(parent)
-        row_frame.pack(fill="x", pady=1)
-
-        # 勾选框
-        enabled_var = tk.BooleanVar(value=enabled)
-        tk.Checkbutton(row_frame, variable=enabled_var, onvalue=True, offvalue=False).pack(side="left")
-
-        # 名称
-        name_var = tk.StringVar(value=name)
-        tk.Entry(row_frame, textvariable=name_var, width=10,
-                 font=("Microsoft YaHei", 9)).pack(side="left", padx=2)
-
-        # 键位下拉（ttk.Combobox，限制下拉高度≈300px）
-        key_display_names = [d for d, _ in SKILL_KEY_CHOICES]
-        key_var = tk.StringVar(value=key_display)
-        key_combo = ttk.Combobox(row_frame, textvariable=key_var, values=key_display_names,
-                                  height=10, width=7, state="readonly",
-                                  style="SkillCombo.TCombobox")
-        key_combo.pack(side="left", padx=2)
-
-        # 持续时间
-        dur_var = tk.StringVar(value=duration)
-        tk.Entry(row_frame, textvariable=dur_var, width=5,
-                 font=("Microsoft YaHei", 9)).pack(side="left", padx=2)
-        tk.Label(row_frame, text="秒", font=("Microsoft YaHei", 8)).pack(side="left")
-
-        # 删除按钮
-        del_btn = tk.Button(row_frame, text="✕", font=("Microsoft YaHei", 9, "bold"),
-                             fg="#e74c3c", width=2, relief="flat",
-                             command=lambda f=row_frame: self._remove_skill_row(f))
-        del_btn.pack(side="left", padx=(6, 0))
-
-        self._skill_rows.append({
-            "frame": row_frame,
-            "name_var": name_var,
-            "key_var": key_var,
-            "dur_var": dur_var,
-            "enabled_var": enabled_var,
-        })
-
-        if len(self._skill_rows) >= 10 and self._skill_add_btn:
-            self._skill_add_btn.config(state="disabled")
-
-    def _remove_skill_row(self, row_frame: tk.Frame) -> None:
-        """删除一行技能配置（直接删，整列表保持原顺序）"""
-        for i, r in enumerate(self._skill_rows):
-            if r["frame"] is row_frame:
-                self._skill_rows.pop(i)
-                row_frame.destroy()
-                break
-        if self._skill_add_btn:
-            self._skill_add_btn.config(state="normal")
 
     def _build_decision_config(self, parent: tk.Widget) -> None:
         """构建决策配置面板"""
@@ -892,47 +549,6 @@ class AutoFarmV2App:
             self._route_dropdown_frame.pack_forget()
             self._monster_config_frame.pack(fill="x")
             self.status_var.set("自动寻怪模式已就绪")
-
-    def _read_skill_configs(self) -> None:
-        """从 GUI 读取技能配置到 _skill_configs"""
-        configs: list[dict] = []
-        for row in self._skill_rows:
-            name = row["name_var"].get().strip()
-            key_display = row["key_var"].get()
-            key_name = SKILL_KEY_LOOKUP.get(key_display, "")
-            try:
-                duration = float(row["dur_var"].get())
-            except (ValueError, TypeError):
-                duration = 0.0
-            configs.append({"name": name or f"技能{len(configs)+1}",
-                            "key": key_name,
-                            "duration": duration,
-                            "enabled": row["enabled_var"].get()})
-        self._skill_configs = configs
-
-    def _process_skills(self, now: float) -> None:
-        """检查并释放到期的技能（跳过未勾选的）"""
-        if not self.running:
-            return
-        for i, cfg in enumerate(self._skill_configs):
-            if not cfg.get("enabled", True):
-                continue
-            key = cfg.get("key", "")
-            duration = cfg.get("duration", 0.0)
-            if not key or duration <= 0:
-                continue
-
-            interval = max(duration - SKILL_SAFETY_MARGIN, 1.0)
-            last = self._skill_last_cast.get(i, 0.0)
-
-            if now - last >= interval:
-                # 先释放所有正在按的键，确保技能按键不被冲突吃掉的
-                self.keys.release_all()
-                time.sleep(0.15)
-                self.keys.tap(key, duration=0.05)
-                self._skill_last_cast[i] = now
-                self._log_error(f"[技能] {cfg['name']} 释放 (键位:{key}, 间隔:{interval:.0f}s)")
-                time.sleep(0.3)  # 给游戏一点时间处理技能动画
 
     def _build_footer(self, parent: tk.Widget) -> None:
         """构建底部 footer：游戏窗口、地图选择、开始按钮、状态"""

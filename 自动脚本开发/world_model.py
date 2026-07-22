@@ -4,6 +4,8 @@ import json
 from collections import deque
 from dataclasses import dataclass, field
 
+from edge_types import EdgeType
+
 
 @dataclass
 class WorldModel:
@@ -30,11 +32,11 @@ class WorldModel:
 
     def is_top(self, pid: str) -> bool:
         return not any(e for e in self.adjacency.get(pid, [])
-                       if e.get("direction") == "up" or e["type"] in ("jump", "flash"))
+                       if e.get("direction") == "up" or e["type"] in (EdgeType.JUMP, EdgeType.FLASH))
 
     def is_bottom(self, pid: str) -> bool:
         return not any(e for e in self.adjacency.get(pid, [])
-                       if e.get("direction") == "down" or e["type"] in ("jump", "flash"))
+                       if e.get("direction") == "down" or e["type"] in (EdgeType.JUMP, EdgeType.FLASH))
 
     @staticmethod
     def _platform_order(pid: str) -> int:
@@ -52,11 +54,11 @@ class WorldModel:
         direct: list[dict] = []
         for e in self.adjacency.get(pid, []):
             if direction == "up":
-                goes = (e["type"] == "rope" and e.get("direction") == "up") or \
-                       e["type"] in ("jump", "flash")
+               goes = (e["type"] == EdgeType.ROPE and e.get("direction") == "up") or \
+                      e["type"] in (EdgeType.JUMP, EdgeType.FLASH)
             else:
-                goes = (e["type"] == "rope" and e.get("direction") == "down") or \
-                       e["type"] in ("jump", "flash")
+               goes = (e["type"] == EdgeType.ROPE and e.get("direction") == "down") or \
+                      e["type"] in (EdgeType.JUMP, EdgeType.FLASH)
             if goes:
                 direct.append(e)
 
@@ -77,8 +79,8 @@ class WorldModel:
                 visited.add(nxt)
                 new_path = path + [e]
                 if direction == "up":
-                    goes = (e["type"] == "rope" and e.get("direction") == "up") or \
-                           e["type"] in ("jump", "flash")
+                    goes = (e["type"] == EdgeType.ROPE and e.get("direction") == "up") or \
+                           e["type"] in (EdgeType.JUMP, EdgeType.FLASH)
                     if goes:
                         return new_path[0] if new_path else e
                 else:
@@ -90,13 +92,13 @@ class WorldModel:
         return None
 
     def get_exit_minimap_x(self, edge: dict) -> float:
-        if edge["type"] == "rope":
+        if edge["type"] == EdgeType.ROPE:
             return edge.get("to_pt", {}).get("x", 0)
         # jump / flash: 用 to 字段
         return edge.get("to", {}).get("x", 0)
 
     def get_exit_target_y(self, edge: dict) -> float | None:
-        if edge["type"] != "rope":
+        if edge["type"] != EdgeType.ROPE:
             return None
         return edge.get("to_pt", {}).get("y")
 

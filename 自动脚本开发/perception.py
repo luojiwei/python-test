@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from edge_types import EdgeType
+
 import config
 from config import (
     YOLO_CONF, YOLO_IOU,
@@ -117,7 +119,7 @@ def detect_on_rope(wm, px: float, py: float, x_tolerance: int = 5) -> bool:
     if wm is None:
         return False
     for edge in wm.edges:
-        if edge.get("type") != "rope":
+        if edge.get("type") != EdgeType.ROPE:
             continue
         top = edge.get("top", {})
         bottom = edge.get("bottom", {})
