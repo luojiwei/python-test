@@ -1948,7 +1948,7 @@
       "type": "rope",
       "from_platform": "platform_8",
       "to_platform": "platform_9",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 16,
         "y": 42
@@ -1963,7 +1963,7 @@
       "type": "rope",
       "from_platform": "platform_9",
       "to_platform": "platform_8",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 16,
         "y": 28
@@ -1978,7 +1978,7 @@
       "type": "rope",
       "from_platform": "platform_5",
       "to_platform": "platform_6",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 58,
         "y": 70
@@ -1993,7 +1993,7 @@
       "type": "rope",
       "from_platform": "platform_6",
       "to_platform": "platform_5",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 58,
         "y": 59
@@ -2008,7 +2008,7 @@
       "type": "rope",
       "from_platform": "platform_5",
       "to_platform": "platform_6",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 64,
         "y": 71
@@ -2023,7 +2023,7 @@
       "type": "rope",
       "from_platform": "platform_6",
       "to_platform": "platform_5",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 64,
         "y": 59
@@ -2038,7 +2038,7 @@
       "type": "rope",
       "from_platform": "platform_2",
       "to_platform": "platform_3",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 64,
         "y": 97
@@ -2053,7 +2053,7 @@
       "type": "rope",
       "from_platform": "platform_3",
       "to_platform": "platform_2",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 64,
         "y": 86
@@ -2068,7 +2068,7 @@
       "type": "rope",
       "from_platform": "platform_0",
       "to_platform": "platform_1",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 36,
         "y": 123
@@ -2083,7 +2083,7 @@
       "type": "rope",
       "from_platform": "platform_1",
       "to_platform": "platform_0",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 36,
         "y": 107
@@ -2098,7 +2098,7 @@
       "type": "rope",
       "from_platform": "platform_0",
       "to_platform": "platform_1",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 59,
         "y": 122
@@ -2113,7 +2113,7 @@
       "type": "rope",
       "from_platform": "platform_1",
       "to_platform": "platform_0",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 59,
         "y": 114
@@ -2128,7 +2128,7 @@
       "type": "rope",
       "from_platform": "platform_1",
       "to_platform": "platform_2",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 82,
         "y": 105
@@ -2143,7 +2143,7 @@
       "type": "rope",
       "from_platform": "platform_2",
       "to_platform": "platform_1",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 82,
         "y": 93
@@ -2158,7 +2158,7 @@
       "type": "rope",
       "from_platform": "platform_0",
       "to_platform": "platform_1",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 81,
         "y": 122
@@ -2173,7 +2173,7 @@
       "type": "rope",
       "from_platform": "platform_1",
       "to_platform": "platform_0",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 81,
         "y": 107
@@ -2188,7 +2188,7 @@
       "type": "rope",
       "from_platform": "platform_3",
       "to_platform": "platform_5",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 82,
         "y": 77
@@ -2203,7 +2203,7 @@
       "type": "rope",
       "from_platform": "platform_5",
       "to_platform": "platform_3",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 82,
         "y": 66
@@ -2218,7 +2218,7 @@
       "type": "rope",
       "from_platform": "platform_5",
       "to_platform": "platform_6",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 89,
         "y": 64
@@ -2233,7 +2233,7 @@
       "type": "rope",
       "from_platform": "platform_6",
       "to_platform": "platform_5",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 89,
         "y": 51
@@ -2248,7 +2248,7 @@
       "type": "rope",
       "from_platform": "platform_8",
       "to_platform": "platform_9",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 103,
         "y": 41
@@ -2263,7 +2263,7 @@
       "type": "rope",
       "from_platform": "platform_9",
       "to_platform": "platform_8",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 103,
         "y": 28
@@ -2278,7 +2278,7 @@
       "type": "rope",
       "from_platform": "platform_0",
       "to_platform": "platform_1",
-      "direction": "上",
+      "direction": "up",
       "from_pt": {
         "x": 81,
         "y": 121
@@ -2293,7 +2293,7 @@
       "type": "rope",
       "from_platform": "platform_1",
       "to_platform": "platform_0",
-      "direction": "下",
+      "direction": "down",
       "from_pt": {
         "x": 81,
         "y": 107

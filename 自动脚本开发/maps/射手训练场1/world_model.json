@@ -309,12 +309,8 @@
           91
         ]
       ],
-      "_index": 0,
-      "id": "platform_0",
-      "y_range": [
-        91,
-        91
-      ]
+      "_idx": 0,
+      "id": "platform_0"
     },
     {
       "left_endpoint": {
@@ -522,12 +518,8 @@
           72
         ]
       ],
-      "_index": 1,
-      "id": "platform_1",
-      "y_range": [
-        72,
-        72
-      ]
+      "_idx": 1,
+      "id": "platform_1"
     },
     {
       "left_endpoint": {
@@ -707,12 +699,8 @@
           57
         ]
       ],
-      "_index": 2,
-      "id": "platform_2",
-      "y_range": [
-        57,
-        57
-      ]
+      "_idx": 2,
+      "id": "platform_2"
     },
     {
       "left_endpoint": {
@@ -880,266 +868,100 @@
           42
         ]
       ],
-      "_index": 3,
-      "id": "platform_3",
-      "y_range": [
-        42,
-        42
-      ]
+      "_idx": 3,
+      "id": "platform_3"
     }
   ],
   "edges": [
     {
+      "id": "e1",
       "type": "rope",
       "from_platform": "platform_2",
       "to_platform": "platform_3",
       "direction": "up",
-      "top": {
-        "x": 77,
-        "y": 43
-      },
-      "bottom": {
+      "from_pt": {
         "x": 77,
         "y": 56
       },
-      "minimap_x": 77
+      "to_pt": {
+        "x": 77,
+        "y": 43
+      }
     },
     {
+      "id": "e2",
       "type": "rope",
       "from_platform": "platform_3",
       "to_platform": "platform_2",
       "direction": "down",
-      "top": {
+      "from_pt": {
         "x": 77,
         "y": 43
       },
-      "bottom": {
+      "to_pt": {
         "x": 77,
         "y": 56
-      },
-      "minimap_x": 77
+      }
     },
     {
+      "id": "e3",
       "type": "rope",
       "from_platform": "platform_1",
       "to_platform": "platform_2",
       "direction": "up",
-      "top": {
-        "x": 54,
-        "y": 58
-      },
-      "bottom": {
+      "from_pt": {
         "x": 54,
         "y": 71
       },
-      "minimap_x": 54
+      "to_pt": {
+        "x": 54,
+        "y": 58
+      }
     },
     {
+      "id": "e4",
       "type": "rope",
       "from_platform": "platform_2",
       "to_platform": "platform_1",
       "direction": "down",
-      "top": {
+      "from_pt": {
         "x": 54,
         "y": 58
       },
-      "bottom": {
+      "to_pt": {
         "x": 54,
         "y": 71
-      },
-      "minimap_x": 54
+      }
     },
     {
+      "id": "e5",
       "type": "rope",
       "from_platform": "platform_0",
       "to_platform": "platform_1",
       "direction": "up",
-      "top": {
-        "x": 69,
-        "y": 73
-      },
-      "bottom": {
+      "from_pt": {
         "x": 69,
         "y": 88
       },
-      "minimap_x": 69
+      "to_pt": {
+        "x": 69,
+        "y": 73
+      }
     },
     {
+      "id": "e6",
       "type": "rope",
       "from_platform": "platform_1",
       "to_platform": "platform_0",
       "direction": "down",
-      "top": {
+      "from_pt": {
         "x": 69,
         "y": 73
       },
-      "bottom": {
+      "to_pt": {
         "x": 69,
         "y": 88
-      },
-      "minimap_x": 69
+      }
     }
-  ],
-  "adjacency": {
-    "platform_2": [
-      {
-        "type": "rope",
-        "from_platform": "platform_2",
-        "to_platform": "platform_3",
-        "direction": "up",
-        "top": {
-          "x": 77,
-          "y": 43
-        },
-        "bottom": {
-          "x": 77,
-          "y": 56
-        },
-        "minimap_x": 77
-      },
-      {
-        "type": "rope",
-        "from_platform": "platform_2",
-        "to_platform": "platform_1",
-        "direction": "down",
-        "top": {
-          "x": 54,
-          "y": 58
-        },
-        "bottom": {
-          "x": 54,
-          "y": 71
-        },
-        "minimap_x": 54
-      }
-    ],
-    "platform_3": [
-      {
-        "type": "rope",
-        "from_platform": "platform_3",
-        "to_platform": "platform_2",
-        "direction": "down",
-        "top": {
-          "x": 77,
-          "y": 43
-        },
-        "bottom": {
-          "x": 77,
-          "y": 56
-        },
-        "minimap_x": 77
-      }
-    ],
-    "platform_1": [
-      {
-        "type": "rope",
-        "from_platform": "platform_1",
-        "to_platform": "platform_2",
-        "direction": "up",
-        "top": {
-          "x": 54,
-          "y": 58
-        },
-        "bottom": {
-          "x": 54,
-          "y": 71
-        },
-        "minimap_x": 54
-      },
-      {
-        "type": "rope",
-        "from_platform": "platform_1",
-        "to_platform": "platform_0",
-        "direction": "down",
-        "top": {
-          "x": 69,
-          "y": 73
-        },
-        "bottom": {
-          "x": 69,
-          "y": 88
-        },
-        "minimap_x": 69
-      }
-    ],
-    "platform_0": [
-      {
-        "type": "rope",
-        "from_platform": "platform_0",
-        "to_platform": "platform_1",
-        "direction": "up",
-        "top": {
-          "x": 69,
-          "y": 73
-        },
-        "bottom": {
-          "x": 69,
-          "y": 88
-        },
-        "minimap_x": 69
-      }
-    ]
-  },
-  "exits": {
-    "platform_0": {
-      "ropes": [
-        {
-          "direction": "up",
-          "minimap_x": 69,
-          "target_platform": "platform_1"
-        }
-      ],
-      "jumps": [],
-      "flashes": []
-    },
-    "platform_1": {
-      "ropes": [
-        {
-          "direction": "up",
-          "minimap_x": 54,
-          "target_platform": "platform_2"
-        },
-        {
-          "direction": "down",
-          "minimap_x": 69,
-          "target_platform": "platform_0"
-        }
-      ],
-      "jumps": [],
-      "flashes": []
-    },
-    "platform_2": {
-      "ropes": [
-        {
-          "direction": "up",
-          "minimap_x": 77,
-          "target_platform": "platform_3"
-        },
-        {
-          "direction": "down",
-          "minimap_x": 54,
-          "target_platform": "platform_1"
-        }
-      ],
-      "jumps": [],
-      "flashes": []
-    },
-    "platform_3": {
-      "ropes": [
-        {
-          "direction": "down",
-          "minimap_x": 77,
-          "target_platform": "platform_2"
-        }
-      ],
-      "jumps": [],
-      "flashes": []
-    }
-  },
-  "platform_order_bottom_to_top": [
-    "platform_0",
-    "platform_1",
-    "platform_2",
-    "platform_3"
   ]
 }

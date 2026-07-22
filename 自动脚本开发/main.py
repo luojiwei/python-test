@@ -14,6 +14,7 @@ import random
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 
@@ -37,6 +38,72 @@ from perception import (
 )
 from world_model import WorldModel, load_world_model
 from commands import Command, ClimbCommand, decide
+
+
+# ============================================================
+# 巡逻路线解析
+# ============================================================
+
+def _load_patrol_routes(map_name: str,
+                         markers_path: Path) -> tuple[list[str], list[list[tuple[float, float]]]]:
+    """从本地 markers.json 加载巡逻路线并解析为坐标。"""
+    if not markers_path.exists():
+        return [], []
+    try:
+        with open(markers_path, "r", encoding="utf-8") as f:
+            md = json.load(f)
+        mc = md.get(map_name, {}) if isinstance(md, dict) else {}
+        routes = mc.get("patrol_routes", [])
+        raw_platforms = mc.get("platforms", [])
+        raw_ropes = mc.get("ropes", [])
+        raw_jumps = mc.get("jumps", [])
+        raw_flashes = mc.get("flash_points", [])
+    except Exception:
+        return [], []
+
+    if not routes or not raw_platforms:
+        return [], []
+
+    # 构建锚点坐标映射
+    anchor_map: dict[str, tuple[float, float]] = {}
+    sorted_plats: list[dict] = []
+    for i, p in enumerate(raw_platforms):
+        np = dict(p); np["_idx"] = i; sorted_plats.append(np)
+    sorted_plats.sort(key=lambda p: p["avg_y"], reverse=True)
+    for i, p in enumerate(sorted_plats):
+        le = p["left_endpoint"]; re = p["right_endpoint"]
+        anchor_map[f"plat_{i}_L"] = (float(le["x"]), float(le["y"]))
+        anchor_map[f"plat_{i}_R"] = (float(re["x"]), float(re["y"]))
+
+    for i, r in enumerate(raw_ropes):
+        tx, ty = r["top"]["x"], r["top"]["y"]
+        bx, by = r["bottom"]["x"], r["bottom"]["y"]
+        anchor_map[f"rope_{i}"] = ((tx + bx) / 2, (ty + by) / 2)
+
+    for i, j in enumerate(raw_jumps):
+        fx, fy = j["from"]["x"], j["from"]["y"]
+        tx, ty = j["to"]["x"], j["to"]["y"]
+        anchor_map[f"jump_{i}"] = ((fx + tx) / 2, (fy + ty) / 2)
+
+    for i, fl in enumerate(raw_flashes):
+        fx, fy = fl["from"]["x"], fl["from"]["y"]
+        tx, ty = fl["to"]["x"], fl["to"]["y"]
+        anchor_map[f"flash_{i}"] = ((fx + tx) / 2, (fy + ty) / 2)
+
+    names: list[str] = []
+    all_coords: list[list[tuple[float, float]]] = []
+    for route in routes:
+        name = route.get("route_name", "未命名路线")
+        coords: list[tuple[float, float]] = []
+        for wid in route.get("waypoints", []):
+            pt = anchor_map.get(wid)
+            if pt:
+                coords.append(pt)
+        if coords:
+            names.append(name)
+            all_coords.append(coords)
+    return names, all_coords
+
 
 
 # ============================================================
@@ -82,6 +149,12 @@ class AutoFarmV2App:
 
         # --- 决策配置 ---
         self.min_monsters_var = tk.IntVar(value=3)
+        self.patrol_mode_var = tk.StringVar(value="auto_hunt")
+        self.patrol_route_idx_var = tk.StringVar(value="")
+        self._patrol_waypoints: list[tuple[float, float]] = []
+        self._patrol_route_names: list[str] = []
+        self._patrol_all_routes: list[list[tuple[float, float]]] = []
+        self._current_waypoint_idx: int = 0
 
         # --- GUI ---
         root.title("自动打怪 v2")
@@ -114,6 +187,7 @@ class AutoFarmV2App:
         cache_path = PROJECT_DIR / "skill_config.json"
         cached_skills: list[dict] = []
         cached_map: str = ""
+        cached_decision: dict = {}
         if cache_path.exists():
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
@@ -123,6 +197,11 @@ class AutoFarmV2App:
                 else:
                     cached_skills = cache_data.get("skills", [])
                     cached_map = cache_data.get("map", "")
+                    cached_decision = {
+                        "patrol_mode": cache_data.get("patrol_mode", "auto_hunt"),
+                        "route_name": cache_data.get("route_name", ""),
+                        "min_monsters": cache_data.get("min_monsters", 3),
+                    }
             except Exception:
                 pass
 
@@ -132,6 +211,7 @@ class AutoFarmV2App:
                     name=item.get("name", ""),
                     key_display=item.get("key_display", "PageUp"),
                     duration=str(item.get("duration", "")),
+                    enabled=item.get("enabled", True),
                 )
         else:
             self._add_skill_row()  # 默认左列
@@ -144,6 +224,17 @@ class AutoFarmV2App:
         if cached_map and hasattr(self, 'map_var'):
             try:
                 self.map_var.set(cached_map)
+            except Exception:
+                pass
+
+        # 恢复缓存的决策配置
+        if cached_decision:
+            try:
+                self.patrol_mode_var.set(cached_decision.get("patrol_mode", "auto_hunt"))
+                self.min_monsters_var.set(int(cached_decision.get("min_monsters", 3)))
+                self._on_patrol_mode_change()  # 根据 patrol_mode 显示对应面板
+                if cached_decision.get("route_name"):
+                    self._route_dropdown_var.set(cached_decision["route_name"])
             except Exception:
                 pass
 
@@ -272,6 +363,22 @@ class AutoFarmV2App:
             return
         self._log_error(f"世界模型: {len(self.wm.platforms)} 平台, {len(self.wm.edges)} 边")
 
+        # 加载巡逻路线（从本地 markers.json）
+        self._patrol_waypoints: list[tuple[float, float]] = []
+        self._patrol_route_names: list[str] = []
+        self._patrol_all_routes: list[list[tuple[float, float]]] = []
+        try:
+            markers_path = map_dir / "markers.json"
+            self._patrol_route_names, self._patrol_all_routes = _load_patrol_routes(
+                map_name, markers_path)
+            # 默认选择第一条路线
+            if self._patrol_all_routes:
+                self._patrol_waypoints = self._patrol_all_routes[0]
+                self._log_error(f"巡逻路线: {len(self._patrol_route_names)}条, "
+                                f"默认 '{self._patrol_route_names[0]}' ({len(self._patrol_waypoints)}途经点)")
+        except Exception as e:
+            self._log_error(f"巡逻路线加载失败: {e}")
+
         self._update_status("加载 YOLO 模型...")
         from ultralytics import YOLO
         try:
@@ -315,16 +422,20 @@ class AutoFarmV2App:
         for i, cfg in enumerate(self._skill_configs):
             self._log_error(f"  #{i} 名称={cfg['name']} 键位={cfg['key']} 持续={cfg['duration']}s")
 
-        # 保存技能配置 + 地图到缓存
+        # 保存技能配置 + 决策配置 + 地图到缓存
         cache_data = {
             "map": self.map_var.get(),
             "skills": [],
+            "patrol_mode": self.patrol_mode_var.get(),
+            "route_name": self._route_dropdown_var.get(),
+            "min_monsters": self.min_monsters_var.get(),
         }
         for row in self._skill_rows:
             cache_data["skills"].append({
                 "name": row["name_var"].get(),
                 "key_display": row["key_var"].get(),
                 "duration": row["dur_var"].get(),
+                "enabled": row["enabled_var"].get(),
             })
         try:
             with open(PROJECT_DIR / "skill_config.json", "w", encoding="utf-8") as f:
@@ -351,6 +462,16 @@ class AutoFarmV2App:
         self._patrol_direction = "up"
         self._transition_in_progress = False
         self._current_command = None
+        self._current_waypoint_idx = 0
+        # 根据下拉框选择设置当前路线
+        selected_route_name = self._route_dropdown_var.get()
+        if selected_route_name and self._patrol_route_names:
+            try:
+                idx = self._patrol_route_names.index(selected_route_name)
+                self._patrol_waypoints = self._patrol_all_routes[idx]
+            except (ValueError, IndexError):
+                if self._patrol_all_routes:
+                    self._patrol_waypoints = self._patrol_all_routes[0]
         self._char_lost_frames = 0
         self._last_logic = time.time()
         self._last_perception = time.time()
@@ -512,8 +633,9 @@ class AutoFarmV2App:
                 # ---- 技能计时器 ----
                 self._process_skills(now)
 
-                # ---- 决策 (每 1s) ----
-                if now - self._last_logic >= LOGIC_INTERVAL and wm:
+                # ---- 决策 (自动寻怪 1s / 固定路线 0.3s) ----
+                logic_interval = 0.3 if self.patrol_mode_var.get() == "fixed_route" else LOGIC_INTERVAL
+                if now - self._last_logic >= logic_interval and wm:
                     if self._transition_in_progress:
                         finished = self._current_command and self._current_command.is_finished()
                         off_rope = (isinstance(self._current_command, ClimbCommand)
@@ -531,10 +653,13 @@ class AutoFarmV2App:
                             self._transition_in_progress = False
                             self._log_error("发现近身怪物，中断上梯优先清怪")
                     else:
-                        cmd, self._patrol_direction, log_text = decide(
+                        cmd, self._patrol_direction, self._current_waypoint_idx, log_text = decide(
                             self.state, wm, self._patrol_direction,
                             self._transition_in_progress,
-                            self.min_monsters_var.get())
+                            self.min_monsters_var.get(),
+                            patrol_mode=self.patrol_mode_var.get(),
+                            patrol_waypoints=self._patrol_waypoints,
+                            current_waypoint_idx=self._current_waypoint_idx)
 
                         if cmd is not None:
                             self._current_command = cmd
@@ -544,10 +669,14 @@ class AutoFarmV2App:
                         self._log_decision(log_text)
                     self._last_logic = now
 
-                    # 朝向僵死检测：同朝向5s怪物数未减少 → 重按朝向键唤醒
+                    # 朝向僵死检测：同平台同朝向有怪时5s怪物数未减少 → 重按朝向键唤醒
                     facing_now = self.state.facing
-                    mc_now = len(self.state.monsters)
-                    if self._facing_stuck_since == 0.0 or mc_now < self._facing_last_count:
+                    # 只统计同平台且同朝向的怪物
+                    same_plat_same_dir = [m for m in self.state.monsters
+                        if abs(m["y2"] - self.state.player_screen_y) <= PLATFORM_TOLERANCE
+                        and ((m["cx"] - self.state.player_screen_x >= 0) == (facing_now == 'r'))]
+                    mc_now = len(same_plat_same_dir)
+                    if mc_now == 0 or self._facing_stuck_since == 0.0 or mc_now < self._facing_last_count:
                         self._facing_stuck_since = now
                         self._facing_last_count = mc_now
                     elif now - self._facing_stuck_since > 5.0 and facing_now in ('l', 'r'):
@@ -599,6 +728,8 @@ class AutoFarmV2App:
         # 每列的小表头
         for col in self._skill_cols:
             hdr = tk.Frame(col)
+            tk.Label(hdr, text="✓", width=2,
+                     font=("Microsoft YaHei", 8, "bold")).pack(side="left")
             tk.Label(hdr, text="技能名称", width=10, anchor="w",
                      font=("Microsoft YaHei", 8, "bold")).pack(side="left", padx=2)
             tk.Label(hdr, text="键位", width=7,
@@ -618,7 +749,7 @@ class AutoFarmV2App:
         btn_frame.pack(anchor="w", pady=(4, 0))
 
     def _add_skill_row(self, name: str = "", key_display: str = "PageUp",
-                       duration: str = "") -> None:
+                       duration: str = "", enabled: bool = True) -> None:
         """添加一行技能配置（左右交替：1→左，2→右，3→左，4→右 ...）"""
         if len(self._skill_rows) >= 10:
             return
@@ -628,6 +759,10 @@ class AutoFarmV2App:
 
         row_frame = tk.Frame(parent)
         row_frame.pack(fill="x", pady=1)
+
+        # 勾选框
+        enabled_var = tk.BooleanVar(value=enabled)
+        tk.Checkbutton(row_frame, variable=enabled_var, onvalue=True, offvalue=False).pack(side="left")
 
         # 名称
         name_var = tk.StringVar(value=name)
@@ -659,6 +794,7 @@ class AutoFarmV2App:
             "name_var": name_var,
             "key_var": key_var,
             "dur_var": dur_var,
+            "enabled_var": enabled_var,
         })
 
         if len(self._skill_rows) >= 10 and self._skill_add_btn:
@@ -681,20 +817,81 @@ class AutoFarmV2App:
                                padx=8, pady=5, fg="#2c3e50")
         panel.pack(side="top", fill="x", padx=15, pady=(5, 2))
 
-        row = tk.Frame(panel)
-        row.pack(fill="x")
+        # 巡逻方式（单选框 + 路线下拉框）
+        mode_row = tk.Frame(panel)
+        mode_row.pack(fill="x", pady=(0, 6))
+        tk.Label(mode_row, text="巡逻方式:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 10))
+        tk.Radiobutton(mode_row, text="自动寻怪", variable=self.patrol_mode_var,
+                       value="auto_hunt", font=("Microsoft YaHei", 9),
+                       command=self._on_patrol_mode_change).pack(side="left", padx=(0, 8))
+        tk.Radiobutton(mode_row, text="固定路线", variable=self.patrol_mode_var,
+                       value="fixed_route", font=("Microsoft YaHei", 9),
+                       command=self._on_patrol_mode_change).pack(side="left")
 
-        tk.Label(row, text="身边怪物最少数:",
+        # 路线选择下拉框（固定路线时显示）
+        self._route_dropdown_frame = tk.Frame(mode_row)
+        self._route_dropdown_frame.pack(side="left", padx=(8, 0))
+        self._route_dropdown_var = tk.StringVar(value="")
+        self._route_dropdown = tk.OptionMenu(self._route_dropdown_frame,
+                                              self._route_dropdown_var, "")
+        self._route_dropdown.config(font=("Microsoft YaHei", 9), width=18, anchor="w")
+        self._route_dropdown.pack(side="left")
+        # 初始隐藏路线下拉，显示怪物配置
+        self._route_dropdown_frame.pack_forget()
+
+        # 自动寻怪配置（身边怪物最少数）
+        self._monster_config_frame = tk.Frame(panel)
+        self._monster_config_frame.pack(fill="x")
+
+        tk.Label(self._monster_config_frame, text="身边怪物最少数:",
                  font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 6))
 
-        spin = tk.Spinbox(row, from_=1, to=20, increment=1, width=5,
+        spin = tk.Spinbox(self._monster_config_frame, from_=1, to=20, increment=1, width=5,
                           textvariable=self.min_monsters_var,
                           font=("Microsoft YaHei", 10),
                           justify="center")
         spin.pack(side="left")
 
-        tk.Label(row, text="  (当前平台怪物数少于此值时切换平台)",
+        tk.Label(self._monster_config_frame, text="  (当前平台怪物数少于此值则切换平台)",
                  font=("Microsoft YaHei", 8), fg="#888").pack(side="left")
+
+    def _on_patrol_mode_change(self) -> None:
+        """巡逻方式变更时的处理"""
+        mode = self.patrol_mode_var.get()
+        if mode == "fixed_route":
+            self._monster_config_frame.pack_forget()
+            # 如果路线数据还未加载，尝试当场加载
+            if not self._patrol_route_names:
+                map_name = self.map_var.get().strip()
+                if map_name and map_name != "(无可用地图)":
+                    map_dir = config.PROJECT_DIR / "maps" / map_name
+                    markers_path = map_dir / "markers.json"
+                    try:
+                        names, coords = _load_patrol_routes(map_name, markers_path)
+                        if names:
+                            self._patrol_route_names = names
+                            self._patrol_all_routes = coords
+                            self._patrol_waypoints = coords[0] if coords else []
+                    except Exception:
+                        pass
+
+            if self._patrol_route_names:
+                menu = self._route_dropdown["menu"]
+                menu.delete(0, "end")
+                for name in self._patrol_route_names:
+                    menu.add_command(label=name,
+                                     command=tk._setit(self._route_dropdown_var, name))
+                self._route_dropdown_var.set(self._patrol_route_names[0])
+                self._route_dropdown_frame.pack(side="left", padx=(8, 0))
+                self.status_var.set(f"固定路线已就绪 ({len(self._patrol_route_names)}条可选)")
+            else:
+                self._route_dropdown_frame.pack_forget()
+                self.status_var.set("⚠ 无巡逻路线数据，请先在地图标记工具中编辑并同步")
+        else:
+            self._route_dropdown_frame.pack_forget()
+            self._monster_config_frame.pack(fill="x")
+            self.status_var.set("自动寻怪模式已就绪")
 
     def _read_skill_configs(self) -> None:
         """从 GUI 读取技能配置到 _skill_configs"""
@@ -709,14 +906,17 @@ class AutoFarmV2App:
                 duration = 0.0
             configs.append({"name": name or f"技能{len(configs)+1}",
                             "key": key_name,
-                            "duration": duration})
+                            "duration": duration,
+                            "enabled": row["enabled_var"].get()})
         self._skill_configs = configs
 
     def _process_skills(self, now: float) -> None:
-        """检查并释放到期的技能"""
+        """检查并释放到期的技能（跳过未勾选的）"""
         if not self.running:
             return
         for i, cfg in enumerate(self._skill_configs):
+            if not cfg.get("enabled", True):
+                continue
             key = cfg.get("key", "")
             duration = cfg.get("duration", 0.0)
             if not key or duration <= 0:

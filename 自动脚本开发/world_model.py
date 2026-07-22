@@ -61,8 +61,6 @@ class WorldModel:
                 direct.append(e)
 
         if direct:
-            # 向上：优先编号最小的平台（最近的上层）
-            # 向下：优先编号最大的平台（最近的下层）
             reverse = (direction == "down")
             direct.sort(key=lambda e: self._platform_order(e["to_platform"]), reverse=reverse)
             return direct[0]
@@ -93,16 +91,14 @@ class WorldModel:
 
     def get_exit_minimap_x(self, edge: dict) -> float:
         if edge["type"] == "rope":
-            return edge.get("minimap_x", edge.get("top", {}).get("x", 0))
-        # jump / flash: 用 from 字段
-        return edge.get("from", {}).get("x", 0)
+            return edge.get("to_pt", {}).get("x", 0)
+        # jump / flash: 用 to 字段
+        return edge.get("to", {}).get("x", 0)
 
     def get_exit_target_y(self, edge: dict) -> float | None:
         if edge["type"] != "rope":
             return None
-        if edge.get("direction") == "up":
-            return edge.get("top", {}).get("y")
-        return edge.get("bottom", {}).get("y")
+        return edge.get("to_pt", {}).get("y")
 
 
 def load_world_model(path: str) -> WorldModel:

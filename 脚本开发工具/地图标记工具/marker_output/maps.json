@@ -4223,6 +4223,25 @@
       }
     ],
     "jumps": [],
-    "flash_points": []
+    "flash_points": [],
+    "patrol_routes": [
+      {
+        "route_name": "默认巡逻路线",
+        "waypoints": [
+          "plat_0_L",
+          "plat_0_R",
+          "rope_2",
+          "plat_1_R",
+          "plat_1_L",
+          "rope_1",
+          "plat_2_L",
+          "plat_2_R",
+          "rope_0",
+          "plat_3_R",
+          "plat_3_L",
+          "plat_0_L"
+        ]
+      }
+    ]
   }
 }

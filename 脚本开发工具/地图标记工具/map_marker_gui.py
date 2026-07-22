@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import tkinter as tk
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -469,6 +470,246 @@ class FlashDetector:
         return len(self.flashes)
 
 
+# ==================== AnchorPoint (巡逻路线锚点) ====================
+
+@dataclass
+class AnchorPoint:
+    """巡逻路线的可选锚点——平台端点 / 绳梯整体 / 跳跃点 / 闪现点。
+
+    对于非平台锚点（绳梯/跳跃/闪现），sub_points 存储其实际端点坐标和
+    所属平台信息，供路线绘制时"智能连接最近子端点"使用。
+    """
+    anchor_id: str         # 如 "plat_0_L", "rope_1", "jump_0"
+    anchor_type: str       # "plat_left" | "plat_right" | "rope" | "jump" | "flash"
+    label: str             # 如 "P0-左端点", "R1", "J0"
+    x: int                 # minimap 坐标 X（锚点中心/平台端点位置）
+    y: int                 # minimap 坐标 Y
+    parent_id: str         # 如 "platform_0"
+    parent_index: int      # 序号
+    platform_ids: list[str] = field(default_factory=list)
+    # 该锚点涉及的平台列表。平台端点 = [自己平台]，绳梯/跳跃/闪现 = [低平台, 高平台]
+    sub_points: list[dict] = field(default_factory=list)
+    # [{"platform_id": "platform_0", "x": 60, "y": 88}, ...]
+    # 绳梯: 2 个子点（bottom→低平台, top→高平台）
+    # 跳跃/闪现: 2 个子点（from→出发平台, to→目标平台）
+
+
+class AnchorResolver:
+    """从 maps.json 的地图数据构建所有可选锚点列表，含平台邻接信息。
+
+    核心职责：
+    1. 枚举所有锚点（平台左/右端点、绳梯、跳跃点、闪现点）
+    2. 为每个非平台锚点记录其子端点各自属于哪个平台
+    3. 记录各平台与锚点的关联关系，支持下拉框联动筛选
+    4. 提供"获取从某锚点出发的可达锚点"方法
+    """
+
+    def __init__(self, platforms: list[dict], ropes: list[dict],
+                 jumps: list[dict], flashes: list[dict]):
+        self._anchors: list[AnchorPoint] = []
+        self._by_id: dict[str, AnchorPoint] = {}
+        # 平台 → 该平台可达的锚点 ID 列表
+        self._platform_anchors: dict[str, list[str]] = {}
+        self._build(platforms, ropes, jumps, flashes)
+
+    def _find_platform_for_xy(self, px: float, py: float,
+                               platforms: list[dict], exclude_id: str = "") -> str | None:
+        """判断 minimap 坐标 (px, py) 最接近哪个平台。"""
+        best_id, best = None, float("inf")
+        for p in platforms:
+            pid = p.get("id", "")
+            if pid == exclude_id:
+                continue
+            lx = p["left_endpoint"]["x"] - 6
+            rx = p["right_endpoint"]["x"] + 6
+            if not (lx <= px <= rx):
+                continue
+            ymin, ymax = p["min_y"] - 4, p["max_y"] + 4
+            if not (ymin <= py <= ymax):
+                continue
+            dist = abs(py - p["avg_y"])
+            if dist < best:
+                best, best_id = dist, pid
+        return best_id
+
+    def _build(self, platforms, ropes, jumps, flashes) -> None:
+        # --- 平台端点 ---
+        for i, p in enumerate(platforms):
+            pid: str = p.get("id", f"platform_{i}")
+            self._platform_anchors.setdefault(pid, [])
+            le, re = p["left_endpoint"], p["right_endpoint"]
+
+            a = AnchorPoint(f"plat_{i}_L", "plat_left",
+                            f"P{i}-左端点", int(le["x"]), int(le["y"]),
+                            pid, i, [pid], [])
+            self._anchors.append(a); self._by_id[a.anchor_id] = a
+            self._platform_anchors[pid].append(a.anchor_id)
+
+            a = AnchorPoint(f"plat_{i}_R", "plat_right",
+                            f"P{i}-右端点", int(re["x"]), int(re["y"]),
+                            pid, i, [pid], [])
+            self._anchors.append(a); self._by_id[a.anchor_id] = a
+            self._platform_anchors[pid].append(a.anchor_id)
+
+        # --- 绳梯：匹配 bottom/top 各自属于哪个平台 ---
+        for i, r in enumerate(ropes):
+            tx, ty = r["top"]["x"], r["top"]["y"]
+            bx, by = r["bottom"]["x"], r["bottom"]["y"]
+            mx, my = int((tx + bx) / 2), int((ty + by) / 2)
+
+            plat_bot = self._find_platform_for_xy(bx, by, platforms)
+            plat_top = self._find_platform_for_xy(tx, ty, platforms)
+
+            sub = []
+            pids = []
+            if plat_bot:
+                sub.append({"platform_id": plat_bot, "x": int(bx), "y": int(by)})
+                pids.append(plat_bot)
+                self._platform_anchors.setdefault(plat_bot, [])
+                self._platform_anchors[plat_bot].append(f"rope_{i}")
+            if plat_top and plat_top != plat_bot:
+                sub.append({"platform_id": plat_top, "x": int(tx), "y": int(ty)})
+                pids.append(plat_top)
+                self._platform_anchors.setdefault(plat_top, [])
+                self._platform_anchors[plat_top].append(f"rope_{i}")
+
+            a = AnchorPoint(f"rope_{i}", "rope", f"R{i}", mx, my,
+                            f"rope_{i}", i, pids, sub)
+            self._anchors.append(a); self._by_id[a.anchor_id] = a
+
+        # --- 跳跃点：匹配 from/to 各自属于哪个平台 ---
+        for i, j in enumerate(jumps):
+            fx, fy = j["from"]["x"], j["from"]["y"]
+            tx, ty = j["to"]["x"], j["to"]["y"]
+            mx, my = int((fx + tx) / 2), int((fy + ty) / 2)
+
+            plat_from = self._find_platform_for_xy(fx, fy, platforms)
+            plat_to = self._find_platform_for_xy(tx, ty, platforms, exclude_id=plat_from or "")
+
+            sub = []; pids = []
+            if plat_from:
+                sub.append({"platform_id": plat_from, "x": int(fx), "y": int(fy)})
+                pids.append(plat_from)
+                self._platform_anchors.setdefault(plat_from, [])
+                self._platform_anchors[plat_from].append(f"jump_{i}")
+            if plat_to and plat_to != plat_from:
+                sub.append({"platform_id": plat_to, "x": int(tx), "y": int(ty)})
+                pids.append(plat_to)
+                self._platform_anchors.setdefault(plat_to, [])
+                self._platform_anchors[plat_to].append(f"jump_{i}")
+
+            a = AnchorPoint(f"jump_{i}", "jump", f"J{i}", mx, my,
+                            f"jump_{i}", i, pids, sub)
+            self._anchors.append(a); self._by_id[a.anchor_id] = a
+
+        # --- 闪现点：匹配 from/to 各自属于哪个平台 ---
+        for i, fl in enumerate(flashes):
+            fx, fy = fl["from"]["x"], fl["from"]["y"]
+            tx, ty = fl["to"]["x"], fl["to"]["y"]
+            mx, my = int((fx + tx) / 2), int((fy + ty) / 2)
+
+            plat_from = self._find_platform_for_xy(fx, fy, platforms)
+            plat_to = self._find_platform_for_xy(tx, ty, platforms, exclude_id=plat_from or "")
+
+            sub = []; pids = []
+            if plat_from:
+                sub.append({"platform_id": plat_from, "x": int(fx), "y": int(fy)})
+                pids.append(plat_from)
+                self._platform_anchors.setdefault(plat_from, [])
+                self._platform_anchors[plat_from].append(f"flash_{i}")
+            if plat_to and plat_to != plat_from:
+                sub.append({"platform_id": plat_to, "x": int(tx), "y": int(ty)})
+                pids.append(plat_to)
+                self._platform_anchors.setdefault(plat_to, [])
+                self._platform_anchors[plat_to].append(f"flash_{i}")
+
+            a = AnchorPoint(f"flash_{i}", "flash", f"F{i}", mx, my,
+                            f"flash_{i}", i, pids, sub)
+            self._anchors.append(a); self._by_id[a.anchor_id] = a
+
+    def get_by_id(self, anchor_id: str) -> AnchorPoint | None:
+        return self._by_id.get(anchor_id)
+
+    def get_sub_point_for_platform(self, anchor_id: str, target_platform: str) -> dict | None:
+        """获取锚点的子端点中属于 target_platform 的那个，用于路线绘制。
+
+        例如 player 从 platform_0 走向 rope_0：
+          get_sub_point_for_platform("rope_0", "platform_0") → {"x": bx, "y": by}（绳梯底部）
+        """
+        a = self._by_id.get(anchor_id)
+        if not a or not a.sub_points:
+            return None
+        for sp in a.sub_points:
+            if sp["platform_id"] == target_platform:
+                return sp
+        # 没找到精确匹配 → 返回第一个（最近原则）
+        if a.sub_points:
+            return a.sub_points[0]
+        return None
+
+    def get_filtered_anchors(self, selected_id: str) -> list[AnchorPoint]:
+        """根据左边选中的锚点，返回右边可选的锚点列表（含同平台另一端点和所有连接点）。"""
+        sa = self._by_id.get(selected_id)
+        if not sa:
+            return self._anchors.copy()
+
+        # 收集选中锚点涉及的所有平台
+        reachable_platforms: set[str] = set(sa.platform_ids)
+
+        # 从这些平台出发，收集所有可达锚点 ID
+        allowed_ids: set[str] = set()
+        for pid in reachable_platforms:
+            for aid in self._platform_anchors.get(pid, []):
+                allowed_ids.add(aid)
+
+        # 过滤：排除自身，排除完全无关的锚点
+        result: list[AnchorPoint] = []
+        for a in self._anchors:
+            if a.anchor_id == selected_id:
+                continue
+            if a.anchor_id in allowed_ids:
+                result.append(a)
+            # 平台端点本身也在允许列表中（同平台另一端）
+        return result
+
+    @property
+    def grouped_options(self) -> list[tuple[str, str]]:
+        """返回 [(anchor_id, display_label), ...] 按分组排序（完整列表）。"""
+        return self._group_anchors(self._anchors)
+
+    def grouped_filtered_options(self, selected_id: str) -> list[tuple[str, str]]:
+        """返回筛选后的 [(anchor_id, display_label), ...]（联动过滤版）。"""
+        filtered = self.get_filtered_anchors(selected_id)
+        return self._group_anchors(filtered)
+
+    @staticmethod
+    def _group_anchors(anchors: list[AnchorPoint]) -> list[tuple[str, str]]:
+        groups: dict[str, list[tuple[str, str, int]]] = {
+            "平台端点": [], "绳梯": [], "跳跃点": [], "闪现点": [],
+        }
+        for a in anchors:
+            if a.anchor_type in ("plat_left", "plat_right"):
+                groups["平台端点"].append((a.anchor_id, f"{a.label}  ({a.x},{a.y})", a.parent_index))
+            elif a.anchor_type == "rope":
+                groups["绳梯"].append((a.anchor_id, f"{a.label}  ({a.x},{a.y})", a.parent_index))
+            elif a.anchor_type == "jump":
+                groups["跳跃点"].append((a.anchor_id, f"{a.label}  ({a.x},{a.y})", a.parent_index))
+            elif a.anchor_type == "flash":
+                groups["闪现点"].append((a.anchor_id, f"{a.label}  ({a.x},{a.y})", a.parent_index))
+        for k in groups:
+            groups[k].sort(key=lambda x: x[2])
+        result: list[tuple[str, str]] = []
+        for gn in ["平台端点", "绳梯", "跳跃点", "闪现点"]:
+            if groups[gn]:
+                if result:
+                    result.append(("__SEP__", f"── {gn} ──"))
+                else:
+                    result.append(("__SEP__", f"── {gn} ──"))
+                for aid, label, _ in groups[gn]:
+                    result.append((aid, label))
+        return result
+
+
 # ==================== Map Marker App ====================
 
 class MapMarkerApp:
@@ -497,7 +738,7 @@ class MapMarkerApp:
 
         # ---- UI ----
         root.title("地图标记工具")
-        root.geometry("440x520")
+        root.geometry("500x520")
         root.resizable(False, False)
 
         tk.Label(root, text="地图标记工具",
@@ -541,6 +782,13 @@ class MapMarkerApp:
                               command=self._on_model_generate)
         btn_model.pack(side="left", padx=2)
         self.mode_buttons["model"] = btn_model
+
+        btn_patrol = tk.Button(f_mm, text="巡逻路线", font=("Microsoft YaHei", 10, "bold"),
+                                width=12, height=1, bg="#e74c3c", fg="white",
+                                activebackground="#c0392b", relief="flat", cursor="hand2",
+                                command=self._on_patrol_route)
+        btn_patrol.pack(side="left", padx=2)
+        self.mode_buttons["patrol"] = btn_patrol
 
         # Minimap coords
         f2 = tk.Frame(root)
@@ -2671,8 +2919,8 @@ class MapMarkerApp:
             tx, ty = r["top"]["x"], r["top"]["y"]; bx, by = r["bottom"]["x"], r["bottom"]["y"]
             pt, pb = _find_platform(tx, ty), _find_platform(bx, by)
             if pt and pb and pt != pb:
-                _add("rope", pb, pt, direction="上", from_pt={"x": bx, "y": by}, to_pt={"x": tx, "y": ty})
-                _add("rope", pt, pb, direction="下", from_pt={"x": tx, "y": ty}, to_pt={"x": bx, "y": by})
+                _add("rope", pb, pt, direction="up", from_pt={"x": bx, "y": by}, to_pt={"x": tx, "y": ty})
+                _add("rope", pt, pb, direction="down", from_pt={"x": tx, "y": ty}, to_pt={"x": bx, "y": by})
 
         for j in jumps:
             ff, ft = j["from"], j["to"]; pf = _find_platform(ff["x"], ff["y"]); pt2 = _find_platform(ft["x"], ft["y"])
@@ -2872,6 +3120,403 @@ class MapMarkerApp:
                   width=10, bg="#8e44ad", fg="white", command=_save).pack(side="left", padx=6)
 
         self.root.wait_window(mgr)
+
+    # ---- 7.5. 巡逻路线编辑器 ----
+
+    def _on_patrol_route(self) -> None:
+        """巡逻路线编辑器入口：打开窗口，编辑和保存巡逻路线到 maps.json。
+
+        功能增强（v2）：
+        - 下拉框联动筛选（左边选择后右边只显示同平台两端点和连接点）
+        - 路线智能连接最近子端点（平台端点→绳梯底部/顶部自动选择）
+        - 每条路段不同颜色区分
+        - 绳梯绘制为加粗线段
+        """
+        if self.running:
+            self.status_text.set("标记运行中，请先停止")
+            return
+        map_name: str = self.map_name_var.get().strip()
+        if not map_name:
+            self.status_text.set("请先输入地图名称")
+            return
+
+        if not MAPS_FILE.exists():
+            self.status_text.set("maps.json 不存在，请先标记地图")
+            return
+
+        with open(MAPS_FILE, "r", encoding="utf-8") as f:
+            data: dict = json.load(f)
+        map_cfg: dict = data.get(map_name, {})
+        platforms_raw: list = map_cfg.get("platforms", [])
+        ropes: list = map_cfg.get("ropes", [])
+        jumps: list = map_cfg.get("jumps", [])
+        flashes: list = map_cfg.get("flash_points", [])
+
+        if not platforms_raw:
+            self.status_text.set("请先生成世界模型（需先标记平台）")
+            return
+
+        # 1. 分配平台 ID（与模型生成保持一致）
+        platforms: list[dict] = []
+        for i, p in enumerate(platforms_raw):
+            np = dict(p); np["_idx"] = i; platforms.append(np)
+        platforms.sort(key=lambda p: p["avg_y"], reverse=True)
+        for i, p in enumerate(platforms):
+            p["id"] = f"platform_{i}"
+
+        # 2. 构建锚点解析器（含平台邻接信息）
+        resolver = AnchorResolver(platforms, ropes, jumps, flashes)
+
+        # 3. 加载已有巡逻路线（兼容旧 segments 格式）
+        saved_routes: list = map_cfg.get("patrol_routes", [])
+        if saved_routes:
+            sr = saved_routes[0]
+            saved_name: str = sr.get("route_name", "默认巡逻路线")
+            raw = sr.get("waypoints", sr.get("segments", []))
+            # 兼容旧 segments 格式 [{start,end},...] → 展开为 waypoints 列表
+            if raw and isinstance(raw[0], dict):
+                saved_waypoints: list[str] = []
+                for i, s in enumerate(raw):
+                    if i == 0:
+                        saved_waypoints.append(s.get("start_anchor", s.get("start", "")))
+                    saved_waypoints.append(s.get("end_anchor", s.get("end", "")))
+            else:
+                saved_waypoints = raw
+        else:
+            saved_waypoints: list[str] = []
+            saved_name = "默认巡逻路线"
+
+        # ---- UI Window ----
+        sw, sh = self.mm_size
+        scale: float = min(5.0, 600 / max(sw, sh, 1))
+        dw: int = int(sw * scale); dh: int = int(sh * scale)
+
+        win = tk.Toplevel(self.root)
+        win.title(f"巡逻路线编辑器 - {map_name}")
+        win.transient(self.root); win.grab_set()
+
+        # === 左侧：小地图 ===
+        left = tk.Frame(win)
+        left.pack(side="left", padx=10, pady=10)
+        canvas = tk.Canvas(left, width=dw, height=dh, highlightthickness=0)
+        canvas.pack()
+
+        # 图例
+        legend = tk.Frame(left)
+        legend.pack(pady=(6, 0))
+        LEGEND_ITEMS = [
+            ("● 平台端点", "#9b59b6"), ("━ 绳梯", "#f1c40f"),
+            ("━ 跳跃点", "#3498db"), ("━ 闪现点", "#e74c3c"),
+        ]
+        for txt, clr in LEGEND_ITEMS:
+            tk.Label(legend, text=txt, font=("Microsoft YaHei", 8),
+                     fg=clr).pack(side="left", padx=4)
+
+        # 途经点数据（运行时修改）
+        waypoints: list[str] = list(saved_waypoints)
+
+        # 每段颜色循环
+        ROUTE_COLORS: list[tuple[int, int, int]] = [
+            (220, 50, 50),     # red
+            (46, 134, 222),    # blue
+            (39, 174, 96),     # green
+            (243, 156, 18),    # orange
+            (155, 89, 182),    # purple
+            (52, 73, 94),      # dark slate
+            (22, 160, 133),    # teal
+            (142, 68, 173),    # wisteria
+        ]
+
+        PLAT_COLOR = (80, 200, 255, 120)
+        ROPE_COLOR = (241, 196, 15)
+        JUMP_COLOR = (52, 152, 219)
+        FLASH_1_COLOR = (231, 76, 60)
+        FLASH_2_COLOR = (46, 204, 113)
+
+        def _resolve_connection_point(anchor: AnchorPoint,
+                                       other_anchor: AnchorPoint) -> tuple[int, int]:
+            """返回 anchor 在图上的最佳连接坐标。
+
+            规则：
+            - 平台端点→直接用自身 (x,y)
+            - 绳梯/跳跃/闪现→在 other_anchor 所属平台中找最近子端点
+              找不到匹配时用第一个子端点
+            """
+            if anchor.anchor_type in ("plat_left", "plat_right"):
+                return (anchor.x, anchor.y)
+
+            # 尝试找与对方平台匹配的子端点
+            for pid in other_anchor.platform_ids:
+                sp = resolver.get_sub_point_for_platform(anchor.anchor_id, pid)
+                if sp:
+                    return (sp["x"], sp["y"])
+
+            # 回退：用第一个子端点
+            if anchor.sub_points:
+                sp = anchor.sub_points[0]
+                return (sp["x"], sp["y"])
+            return (anchor.x, anchor.y)
+
+        def _draw_map() -> ImageTk.PhotoImage:
+            w2, h2 = sw, sh
+            rx, ry = dw / max(w2, 1), dh / max(h2, 1)
+            rt = (rx + ry) / 2
+
+            if self._mm_snapshot and self._mm_snapshot.size == (w2, h2):
+                img = self._mm_snapshot.resize((dw, dh), Image.LANCZOS).copy()
+            else:
+                img = Image.new("RGB", (dw, dh), (245, 245, 240))
+            draw = ImageDraw.Draw(img)
+            try:
+                fnt = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", max(6, int(9 * rt)))
+                fnt_sm = ImageFont.truetype("C:/Windows/Fonts/simhei.ttf", max(5, int(7 * rt)))
+            except Exception:
+                fnt = ImageFont.load_default()
+                fnt_sm = fnt
+
+            # --- 平台 ---
+            for p in platforms:
+                pts = p.get("all_points", [])
+                if not pts:
+                    continue
+                poly = [(int(x * rx), int(y * ry)) for x, y in pts]
+                draw.polygon(poly, fill=PLAT_COLOR, outline=(255, 255, 255, 230))
+                cx = sum(x for x, _ in poly) // max(len(poly), 1)
+                cy = sum(y for _, y in poly) // max(len(poly), 1)
+                lbl = p["id"].replace("platform_", "P")
+                draw.text((cx - 10, cy - 8), lbl, fill=(255, 255, 255), font=fnt)
+
+                le = p["left_endpoint"]; re = p["right_endpoint"]
+                lx, ly = int(le["x"] * rx), int(le["y"] * ry)
+                rx2, ry2 = int(re["x"] * rx), int(re["y"] * ry)
+                r2 = max(1, int(2 * rt))
+                draw.ellipse([lx - r2, ly - r2, lx + r2, ly + r2], fill="#9b59b6")
+                draw.ellipse([rx2 - r2, ry2 - r2, rx2 + r2, ry2 + r2], fill="#9b59b6")
+
+            # --- 绳梯：纯线段 ---
+            for i, r in enumerate(ropes):
+                tx, ty = int(r["top"]["x"] * rx), int(r["top"]["y"] * ry)
+                bx, by = int(r["bottom"]["x"] * rx), int(r["bottom"]["y"] * ry)
+                draw.line([(tx, ty), (bx, by)], fill=ROPE_COLOR, width=3)
+                mx, my = (tx + bx) // 2, (ty + by) // 2
+                draw.text((mx + 4, my - 6), f"R{i}", fill=ROPE_COLOR, font=fnt_sm)
+
+            # --- 跳跃点：纯线段 ---
+            for i, j in enumerate(jumps):
+                fx, fy = int(j["from"]["x"] * rx), int(j["from"]["y"] * ry)
+                tx, ty = int(j["to"]["x"] * rx), int(j["to"]["y"] * ry)
+                draw.line([(fx, fy), (tx, ty)], fill=JUMP_COLOR, width=3)
+                mx, my = (fx + tx) // 2, (fy + ty) // 2
+                draw.text((mx + 4, my - 6), f"J{i}", fill=JUMP_COLOR, font=fnt_sm)
+
+            # --- 闪现点：纯线段 ---
+            for i, fl in enumerate(flashes):
+                fx, fy = int(fl["from"]["x"] * rx), int(fl["from"]["y"] * ry)
+                tx, ty = int(fl["to"]["x"] * rx), int(fl["to"]["y"] * ry)
+                ft = fl.get("type", "one_way")
+                clr = FLASH_2_COLOR if ft == "two_way" else FLASH_1_COLOR
+                draw.line([(fx, fy), (tx, ty)], fill=clr, width=3)
+                mx, my = (fx + tx) // 2, (fy + ty) // 2
+                draw.text((mx + 4, my - 6), f"F{i}", fill=clr, font=fnt_sm)
+
+            # --- 巡逻路线：途经点链式连接，相邻点间画线 ---
+            if len(waypoints) >= 2:
+                anchors = [resolver.get_by_id(wid) for wid in waypoints]
+                for i in range(len(anchors) - 1):
+                    sa, ea = anchors[i], anchors[i + 1]
+                    if not sa or not ea:
+                        continue
+
+                    sx, sy = _resolve_connection_point(sa, ea)
+                    ex, ey = _resolve_connection_point(ea, sa)
+                    x1, y1 = int(sx * rx), int(sy * ry)
+                    x2, y2 = int(ex * rx), int(ey * ry)
+
+                    seg_color = ROUTE_COLORS[i % len(ROUTE_COLORS)]
+                    draw.line([(x1, y1), (x2, y2)], fill=seg_color, width=3)
+
+                    # 方向箭头
+                    mx2, my2 = (x1 + x2) // 2, (y1 + y2) // 2
+                    seg_len = max(1.0, ((x2 - x1)**2 + (y2 - y1)**2)**0.5)
+                    dx, dy = (x2 - x1) / seg_len, (y2 - y1) / seg_len
+                    arr_sz = max(3, int(4 * rt))
+                    draw.polygon(
+                        [(int(mx2 + dx * arr_sz), int(my2 + dy * arr_sz)),
+                         (int(mx2 - dx * arr_sz / 2 - dy * arr_sz / 2),
+                          int(my2 - dy * arr_sz / 2 + dx * arr_sz / 2)),
+                         (int(mx2 - dx * arr_sz / 2 + dy * arr_sz / 2),
+                          int(my2 - dy * arr_sz / 2 - dx * arr_sz / 2))],
+                        fill=seg_color)
+
+            return ImageTk.PhotoImage(img)
+
+        canvas.photo = _draw_map()
+        canvas.create_image(0, 0, anchor="nw", image=canvas.photo)
+
+        def _refresh_map() -> None:
+            canvas.photo = _draw_map()
+            canvas.delete("all")
+            canvas.create_image(0, 0, anchor="nw", image=canvas.photo)
+
+        # === 右侧：路线编辑面板 ===
+        right = tk.Frame(win)
+        right.pack(side="right", fill="y", padx=10, pady=10)
+
+        tk.Label(right, text="路线编辑（链式途经点）",
+                 font=("Microsoft YaHei", 11, "bold")).pack(anchor="w", pady=(0, 5))
+
+        # 按钮栏
+        bbar_top = tk.Frame(right)
+        bbar_top.pack(fill="x", pady=(0, 6))
+        tk.Button(bbar_top, text="+ 添加途经点", font=("Microsoft YaHei", 9),
+                  width=14, bg="#2ecc71", fg="white", cursor="hand2",
+                  command=lambda: _add_waypoint()).pack(side="left", padx=2)
+        tk.Button(bbar_top, text="清空所有", font=("Microsoft YaHei", 9),
+                  width=10, bg="#95a5a6", fg="white", cursor="hand2",
+                  command=lambda: _clear_all()).pack(side="left", padx=2)
+
+        # 途经点列表面板
+        seg_frame = tk.Frame(right)
+        seg_frame.pack(fill="both", expand=True)
+
+        seg_canvas = tk.Canvas(seg_frame, width=380, highlightthickness=0)
+        seg_scroll = tk.Scrollbar(seg_frame, orient="vertical", command=seg_canvas.yview)
+        seg_inner = tk.Frame(seg_canvas)
+        seg_inner.bind("<Configure>", lambda e: seg_canvas.configure(
+            scrollregion=seg_canvas.bbox("all")))
+        seg_canvas.create_window((0, 0), window=seg_inner, anchor="nw")
+        seg_canvas.configure(yscrollcommand=seg_scroll.set)
+        seg_canvas.pack(side="left", fill="both", expand=True)
+        seg_scroll.pack(side="right", fill="y")
+
+        empty_lbl = tk.Label(seg_inner, text="请添加途经点开始编辑\n（按顺序连接）",
+                             font=("Microsoft YaHei", 9), fg="#999")
+        empty_lbl.pack(pady=10)
+
+        # 途经点行引用: [{"var": StringVar, "frame": Frame, "idx": int}, ...]
+        waypoint_rows: list[dict] = []
+
+        # 完整下拉选项
+        full_options: list[tuple[str, str]] = resolver.grouped_options
+
+        def _build_map_options(option_pairs: list[tuple[str, str]]) -> tuple[list[str], dict[str, str]]:
+            display_map: dict[str, str] = {}
+            display_list: list[str] = []
+            for aid, label in option_pairs:
+                display_map[label] = aid
+                display_list.append(label)
+            return display_list, display_map
+
+        full_display_vals, full_display_to_id = _build_map_options(full_options)
+
+        def _add_waypoint(wid: str = "") -> None:
+            empty_lbl.pack_forget()
+            idx = len(waypoint_rows)
+            row = tk.Frame(seg_inner)
+            row.pack(fill="x", pady=2)
+
+            tk.Label(row, text=f"途经{idx + 1}:", font=("Microsoft YaHei", 9),
+                     width=6, anchor="e").pack(side="left")
+
+            var = tk.StringVar(value="")
+            om = tk.OptionMenu(row, var, *full_display_vals)
+            om.config(font=("Microsoft YaHei", 9), width=22, anchor="w")
+            om.pack(side="left", padx=2)
+
+            def _on_change(*_args):
+                _sync_waypoints()
+                _refresh_map()
+
+            var.trace_add("write", _on_change)
+
+            btn_del = tk.Button(row, text="×", font=("Microsoft YaHei", 9, "bold"),
+                                width=2, bg="#e74c3c", fg="white", relief="flat",
+                                cursor="hand2",
+                                command=lambda ridx=idx: _delete_waypoint(ridx))
+            btn_del.pack(side="left", padx=4)
+
+            waypoint_rows.append({"var": var, "frame": row, "idx": idx, "menu": om})
+
+            if wid:
+                for disp, aid in full_display_to_id.items():
+                    if aid == wid:
+                        var.set(disp)
+                        break
+
+            _sync_waypoints()
+            _refresh_map()
+
+        def _delete_waypoint(ridx: int) -> None:
+            if ridx < len(waypoint_rows):
+                waypoint_rows[ridx]["frame"].destroy()
+                waypoint_rows.pop(ridx)
+                for i, r in enumerate(waypoint_rows):
+                    for child in r["frame"].winfo_children():
+                        if isinstance(child, tk.Label) and "途经" in (child.cget("text") or ""):
+                            child.config(text=f"途经{i + 1}:")
+                            break
+                    r["idx"] = i
+            if not waypoint_rows:
+                empty_lbl.pack(pady=10)
+            _sync_waypoints()
+            _refresh_map()
+
+        def _clear_all() -> None:
+            for r in waypoint_rows:
+                r["frame"].destroy()
+            waypoint_rows.clear()
+            empty_lbl.pack(pady=10)
+            _sync_waypoints()
+            _refresh_map()
+
+        def _sync_waypoints() -> None:
+            waypoints.clear()
+            for r in waypoint_rows:
+                aid = full_display_to_id.get(r["var"].get(), "")
+                if aid:
+                    waypoints.append(aid)
+
+        # 加载已有途经点
+        if saved_waypoints:
+            empty_lbl.pack_forget()
+            for wid in saved_waypoints:
+                _add_waypoint(wid)
+
+        # 路线名称
+        name_frame = tk.Frame(right)
+        name_frame.pack(fill="x", pady=(10, 6))
+        tk.Label(name_frame, text="路线名称:", font=("Microsoft YaHei", 9),
+                 width=9, anchor="e").pack(side="left")
+        name_var = tk.StringVar(value=saved_name)
+        tk.Entry(name_frame, textvariable=name_var,
+                 font=("Microsoft YaHei", 10), width=28).pack(side="left", padx=(4, 0))
+
+        # 保存/取消
+        bbar_bot = tk.Frame(right)
+        bbar_bot.pack(fill="x", pady=(6, 0))
+
+        def _save() -> None:
+            _sync_waypoints()
+            with open(MAPS_FILE, "r", encoding="utf-8") as f:
+                all_data: dict = json.load(f)
+            route_data = {
+                "route_name": name_var.get().strip() or "默认巡逻路线",
+                "waypoints": list(waypoints),
+            }
+            all_data.setdefault(map_name, {})["patrol_routes"] = [route_data]
+            with open(MAPS_FILE, "w", encoding="utf-8") as f:
+                json.dump(all_data, f, ensure_ascii=False, indent=2)
+            self.status_text.set(f"巡逻路线已保存到 {map_name}")
+            win.destroy()
+
+        tk.Button(bbar_bot, text="保存路线", font=("Microsoft YaHei", 10, "bold"),
+                  width=12, bg="#8e44ad", fg="white", command=_save,
+                  cursor="hand2").pack(side="left", padx=2)
+        tk.Button(bbar_bot, text="取消", font=("Microsoft YaHei", 10),
+                  width=8, bg="#95a5a6", fg="white", command=win.destroy,
+                  cursor="hand2").pack(side="left", padx=2)
+
+        self.root.wait_window(win)
 
     # ---- 7. View all markers ----
 

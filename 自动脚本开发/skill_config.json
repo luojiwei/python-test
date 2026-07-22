@@ -4,17 +4,23 @@
     {
       "name": "无形箭",
       "key_display": "PageUp",
-      "duration": "240"
+      "duration": "240",
+      "enabled": true
     },
     {
       "name": "快速箭",
       "key_display": "A",
-      "duration": "110"
+      "duration": "110",
+      "enabled": true
     },
     {
       "name": "宠物食品",
       "key_display": "PageDown",
-      "duration": "900"
+      "duration": "900",
+      "enabled": false
     }
-  ]
+  ],
+  "patrol_mode": "fixed_route",
+  "route_name": "默认巡逻路线",
+  "min_monsters": 3
 }
