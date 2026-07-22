@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "D:\Program Files (x86)\Tencent\WorkBuddy\python-test\脚本开发工具\地图标记工具\markers\rope_marker.py", line 103, in _rope_review_and_save
+    try: self._rope_review_and_save_impl()
+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "D:\Program Files (x86)\Tencent\WorkBuddy\python-test\脚本开发工具\地图标记工具\markers\rope_marker.py", line 147, in _rope_review_and_save_impl
+    review_win = tk.Toplevel(self.root)
+                 ^^
+NameError: name 'tk' is not defined

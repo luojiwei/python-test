@@ -17,7 +17,7 @@ from world_model import WorldModel
 # 延迟导入 Command 子类（避免循环依赖）
 from commands import (
     AttackCommand, ClimbCommand, Command, FlashCommand, HoldDirCommand,
-    IdleCommand, JumpCommand, MoveToCommand, TimedAttackCommand,
+    IdleCommand, JumpCommand, JumpDownCommand, MoveToCommand, TimedAttackCommand,
     TurnAndAttackCommand, nearest_monster,
 )
 
@@ -39,7 +39,8 @@ class DecisionStrategy(ABC):
                transition_in_progress: bool,
                min_monsters_on_platform: int,
                patrol_waypoints: list | None,
-               current_waypoint_idx: int) -> tuple[Command | None, str, int, str]:
+               current_waypoint_idx: int,
+               return_method: str = "一直走") -> tuple[Command | None, str, int, str]:
         """返回 (command, new_patrol_direction, new_waypoint_idx, log_text)。"""
         ...
 
@@ -124,7 +125,8 @@ class AutoHuntStrategy(DecisionStrategy):
                transition_in_progress: bool,
                min_monsters_on_platform: int,
                patrol_waypoints: list | None,
-               current_waypoint_idx: int) -> tuple[Command | None, str, int, str]:
+               current_waypoint_idx: int,
+               return_method: str = "一直走") -> tuple[Command | None, str, int, str]:
 
         cx, cy, log_lines, current_platform, facing = self._init_log(state, wm)
         monsters = state.monsters
@@ -286,7 +288,8 @@ class FixedRouteStrategy(DecisionStrategy):
                transition_in_progress: bool,
                min_monsters_on_platform: int,
                patrol_waypoints: list | None,
-               current_waypoint_idx: int) -> tuple[Command | None, str, int, str]:
+               current_waypoint_idx: int,
+               return_method: str = "一直走") -> tuple[Command | None, str, int, str]:
 
         cx, cy, log_lines, current_platform, facing = self._init_log(state, wm)
         monsters = state.monsters
@@ -311,13 +314,15 @@ class FixedRouteStrategy(DecisionStrategy):
         mm_dx = wp_x - state.player_minimap_x
         mm_dy = wp_y - state.player_minimap_y
         log_lines.append(f"途经点[{current_waypoint_idx}]: ({wp_x:.0f},{wp_y:.0f})  "
-                         f"平台={plat_label2}  距离=({mm_dx:+.0f},{mm_dy:+.0f})")
+                         f"平台={plat_label2}  距离=({mm_dx:+.0f},{mm_dy:+.0f})  "
+                         f"回归={return_method}")
 
         # 跨平台移动
         if current_platform and wp_platform and current_platform != wp_platform:
             return self._cross_platform(state, wm, current_platform, wp_platform,
                                          mm_dx, transition_in_progress,
-                                         patrol_direction, current_waypoint_idx, log_lines)
+                                         patrol_direction, current_waypoint_idx,
+                                         return_method, log_lines)
 
         # 同平台移动
         if ((mm_dx)**2 + (mm_dy)**2)**0.5 < 10:
@@ -344,12 +349,20 @@ class FixedRouteStrategy(DecisionStrategy):
                          current_platform: str, wp_platform: str,
                          mm_dx: float, transition_in_progress: bool,
                          patrol_direction: str, current_waypoint_idx: int,
+                         return_method: str,
                          log_lines: list[str]) -> tuple[Command, str, int, str]:
-        """跨平台移动逻辑。"""
+        """跨平台移动逻辑。
+
+        return_method 控制无直接连接时的行为：
+        - "无": 通过平台连接图 BFS 寻找路径
+        - "一直走": 朝目标方向直线行走
+        - "下跳": 按 Alt+↓ 跳下平台
+        """
         if transition_in_progress:
             log_lines.append("动作: 跨平台移动中，等待完成...")
             return IdleCommand(), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
 
+        # 查找直达边
         exit_edge = None
         for e in wm.edges:
             if e.get("from_platform") == current_platform and e.get("to_platform") == wp_platform:
@@ -359,16 +372,35 @@ class FixedRouteStrategy(DecisionStrategy):
         if exit_edge is None:
             curr_order = wm._platform_order(current_platform)
             wp_order = wm._platform_order(wp_platform)
-            if wp_order > curr_order:
-                exit_edge = wm.find_nearest_exit(current_platform, "up", state.player_minimap_x)
-            else:
+
+            if return_method == "一直走":
+                # 一直走：朝目标方向步行，不寻路
                 move_dir = 'r' if mm_dx > 0 else 'l'
-                log_lines.append(f"动作: 目标平台在下方，朝{'右' if move_dir == 'r' else '左'}步行掉落")
+                target_pos = "上方" if wp_order > curr_order else "下方"
+                log_lines.append(f"动作: 目标平台在{target_pos}，回归方式=一直走，朝{'右' if move_dir == 'r' else '左'}步行")
                 return HoldDirCommand(move_dir), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
+
+            elif return_method == "下跳":
+                # 下跳：Alt+↓ 从平台跳下
+                log_lines.append("动作: 回归方式=下跳，Alt+↓ 跳下平台")
+                return JumpDownCommand(), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
+
+            else:  # "无" — 默认：寻找平台连接点计算回归路线
+                if wp_order > curr_order:
+                    direction = "up"
+                else:
+                    direction = "down"
+                exit_edge = wm.find_nearest_exit(current_platform, direction, state.player_minimap_x)
+                if exit_edge is None:
+                    move_dir = 'r' if mm_dx > 0 else 'l'
+                    log_lines.append(f"动作: 回归方式=无，未找到{direction}方出口，朝{'右' if move_dir == 'r' else '左'}步行")
+                    return HoldDirCommand(move_dir), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
+                else:
+                    log_lines.append(f"动作: 回归方式=无，BFS找到{direction}方出口")
 
         if exit_edge is None:
             move_dir = 'r' if mm_dx > 0 else 'l'
-            log_lines.append(f"动作: 无直达出口，朝{'右' if move_dir == 'r' else '左'}方向步行")
+            log_lines.append(f"动作: 无可用出口，朝{'右' if move_dir == 'r' else '左'}方向步行")
             return HoldDirCommand(move_dir), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
 
         edge_type = exit_edge["type"]

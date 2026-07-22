@@ -95,6 +95,7 @@ class AutoFarmV2App:
         self._patrol_waypoints: list[tuple[float, float]] = []
         self._patrol_route_names: list[str] = []
         self._patrol_all_routes: list[list[tuple[float, float]]] = []
+        self._patrol_return_method: str = "一直走"
         self._current_waypoint_idx: int = 0
 
         # --- GUI ---
@@ -301,6 +302,7 @@ class AutoFarmV2App:
         self._patrol_route_names = result.patrol_route_names
         self._patrol_all_routes = result.patrol_all_routes
         self._patrol_waypoints = result.patrol_waypoints
+        self._patrol_return_method = result.patrol_return_method
 
         # 延时初始化依赖资源的组件
         self.skills.actions = self.actions
@@ -424,7 +426,8 @@ class AutoFarmV2App:
                             self.min_monsters_var.get(),
                             patrol_mode=self.patrol_mode_var.get(),
                             patrol_waypoints=self._patrol_waypoints,
-                            current_waypoint_idx=self._current_waypoint_idx)
+                            current_waypoint_idx=self._current_waypoint_idx,
+                            return_method=self._patrol_return_method)
 
                         if cmd is not None:
                             self._current_command = cmd
@@ -525,11 +528,12 @@ class AutoFarmV2App:
                     map_dir = config.PROJECT_DIR / "maps" / map_name
                     markers_path = map_dir / "markers.json"
                     try:
-                        names, coords = _load_patrol_routes(map_name, markers_path)
+                        names, coords, methods = MapLoader._load_patrol_routes(map_name, map_dir)
                         if names:
                             self._patrol_route_names = names
                             self._patrol_all_routes = coords
                             self._patrol_waypoints = coords[0] if coords else []
+                            self._patrol_return_method = methods[0] if methods else "一直走"
                     except Exception:
                         pass
 

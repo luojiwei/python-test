@@ -279,6 +279,29 @@ class HoldDirCommand(Command):
         actions.move_no_facing(self._dir)
 
 
+class JumpDownCommand(Command):
+    """下跳命令：Alt+↓ 从平台跳下。
+
+    固定路线回归方式「下跳」专用，按住 Alt+↓ 短暂时间后释放。
+    """
+    JUMP_DOWN_DURATION: float = 0.5
+
+    def __init__(self) -> None:
+        self._start_time: float = time.time()
+
+    def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
+        if time.time() - self._start_time < self.JUMP_DOWN_DURATION:
+            actions.hold('j', 'd')
+        else:
+            actions.release_all()
+
+    def is_finished(self) -> bool:
+        return time.time() - self._start_time > self.JUMP_DOWN_DURATION
+
+    def is_transition(self) -> bool:
+        return True
+
+
 class IdleCommand(Command):
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
         actions.release_all()
@@ -306,7 +329,8 @@ def decide(state: GameState, wm: WorldModel,
            min_monsters_on_platform: int = 3,
            patrol_mode: str = "auto_hunt",
            patrol_waypoints: list | None = None,
-           current_waypoint_idx: int = 0) -> tuple[Command, str, int, str]:
+           current_waypoint_idx: int = 0,
+           return_method: str = "一直走") -> tuple[Command, str, int, str]:
     """决策调度器：根据 patrol_mode 分发到对应策略。
 
     新决策模式只需在 decision_strategies.STRATEGIES 中注册即可。
@@ -317,4 +341,5 @@ def decide(state: GameState, wm: WorldModel,
         return IdleCommand(), patrol_direction, current_waypoint_idx, "无匹配策略"
     return strategy.decide(
         state, wm, patrol_direction, transition_in_progress,
-        min_monsters_on_platform, patrol_waypoints, current_waypoint_idx)
+        min_monsters_on_platform, patrol_waypoints, current_waypoint_idx,
+        return_method)

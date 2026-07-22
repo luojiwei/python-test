@@ -891,6 +891,7 @@
     "patrol_routes": [
       {
         "route_name": "默认巡逻路线",
+        "return_method": "一直走",
         "waypoints": [
           "plat_0_L",
           "plat_0_R",

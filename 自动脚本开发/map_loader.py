@@ -27,6 +27,8 @@ class LoadResult:
     patrol_route_names: list[str] = field(default_factory=list)
     patrol_all_routes: list[list[tuple[float, float]]] = field(default_factory=list)
     patrol_waypoints: list[tuple[float, float]] = field(default_factory=list)
+    patrol_return_methods: list[str] = field(default_factory=list)
+    patrol_return_method: str = "一直走"
     mm_region: tuple[int, int, int, int] = (0, 0, 0, 0)
 
 
@@ -76,11 +78,13 @@ class MapLoader:
         self._log(f"世界模型: {len(wm.platforms)} 平台, {len(wm.edges)} 边")
 
         # 3. 巡逻路线
-        patrol_names, patrol_routes = self._load_patrol_routes(map_name, map_dir)
+        patrol_names, patrol_routes, patrol_return_methods = self._load_patrol_routes(map_name, map_dir)
         patrol_waypoints = patrol_routes[default_route_idx] if patrol_routes else []
+        patrol_return_method = patrol_return_methods[default_route_idx] if patrol_return_methods else "一直走"
         if patrol_routes:
             self._log(f"巡逻路线: {len(patrol_names)}条, "
-                      f"默认 '{patrol_names[default_route_idx]}' ({len(patrol_waypoints)}途经点)")
+                      f"默认 '{patrol_names[default_route_idx]}' ({len(patrol_waypoints)}途经点) "
+                      f"回归={patrol_return_method}")
 
         # 4. YOLO 模型
         self._status("加载 YOLO 模型...")
@@ -130,6 +134,8 @@ class MapLoader:
             patrol_route_names=patrol_names,
             patrol_all_routes=patrol_routes,
             patrol_waypoints=patrol_waypoints,
+            patrol_return_methods=patrol_return_methods,
+            patrol_return_method=patrol_return_method,
             mm_region=mm_region,
         )
 
@@ -137,8 +143,12 @@ class MapLoader:
 
     @staticmethod
     def _load_patrol_routes(map_name: str,
-                             map_dir: Path) -> tuple[list[str], list[list[tuple[float, float]]]]:
-        """从 markers.json 加载巡逻路线并解析为坐标。"""
+                             map_dir: Path) -> tuple[list[str], list[list[tuple[float, float]]], list[str]]:
+        """从 markers.json 加载巡逻路线并解析为坐标。
+
+        Returns:
+            (route_names, all_coords, return_methods)
+        """
         markers_path = map_dir / "markers.json"
         if not markers_path.exists():
             return [], []
@@ -153,16 +163,17 @@ class MapLoader:
             raw_jumps = mc.get("jumps", [])
             raw_flashes = mc.get("flash_points", [])
         except Exception:
-            return [], []
+            return [], [], []
 
         if not routes or not raw_platforms:
-            return [], []
+            return [], [], []
 
         anchor_map = MapLoader._build_anchor_map(
             raw_platforms, raw_ropes, raw_jumps, raw_flashes)
 
         names: list[str] = []
         all_coords: list[list[tuple[float, float]]] = []
+        return_methods: list[str] = []
         for route in routes:
             name = route.get("route_name", "未命名路线")
             coords: list[tuple[float, float]] = []
@@ -173,7 +184,8 @@ class MapLoader:
             if coords:
                 names.append(name)
                 all_coords.append(coords)
-        return names, all_coords
+                return_methods.append(route.get("return_method", "一直走"))
+        return names, all_coords, return_methods
 
     @staticmethod
     def _build_anchor_map(platforms: list[dict], ropes: list[dict],
