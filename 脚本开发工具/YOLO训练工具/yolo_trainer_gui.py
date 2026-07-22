@@ -91,8 +91,6 @@ IMAGES_TRAIN_DIR = DATASET_DIR / "images" / "train"
 IMAGES_VAL_DIR = DATASET_DIR / "images" / "val"
 LABELS_TRAIN_DIR = DATASET_DIR / "labels" / "train"
 LABELS_VAL_DIR = DATASET_DIR / "labels" / "val"
-TRAIN_LIST_FILE = DATASET_DIR / "train_list.json"
-VAL_LIST_FILE = DATASET_DIR / "val_list.json"
 DATA_YAML = DATASET_DIR / "data.yaml"
 TRAIN_OUTPUT_DIR = PROJECT_DIR / "outputs"  # 训练结果输出目录
 TRAINED_MODELS_DIR = PROJECT_DIR / "trained_models"  # 归档目录
@@ -270,7 +268,7 @@ def pick_window_dialog(root, windows, title="选择窗口"):
 # ============================================================
 
 def split_images_to_dataset(screenshot_dir: Path):
-    """将截图按 80/20 比例分配到 images/train 和 images/val。"""
+    """将截图按比例分配到 images/train 和 images/val。返回 (train_paths, val_paths)。"""
     images = sorted(
         [f for f in screenshot_dir.iterdir() if f.suffix.lower() in (".png", ".jpg", ".jpeg")]
     )
@@ -296,18 +294,7 @@ def split_images_to_dataset(screenshot_dir: Path):
     for img in val_images:
         shutil.copy2(str(img), str(IMAGES_VAL_DIR / img.name))
 
-    # 记录图片清单
-    train_names = [img.name for img in train_images]
-    val_names = [img.name for img in val_images]
-    DATASET_DIR.mkdir(parents=True, exist_ok=True)
-
-    with open(TRAIN_LIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(train_names, f, indent=2, ensure_ascii=False)
-
-    with open(VAL_LIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(val_names, f, indent=2, ensure_ascii=False)
-
-    return train_names, val_names
+    return train_images, val_images
 
 
 # ============================================================
@@ -315,19 +302,13 @@ def split_images_to_dataset(screenshot_dir: Path):
 # ============================================================
 
 def distribute_labels(label_files: list):
-    """根据图片清单将 label txt 文件分发到 labels/train 和 labels/val。"""
-    if not TRAIN_LIST_FILE.exists() or not VAL_LIST_FILE.exists():
-        messagebox.showerror("错误", "图片清单不存在，请先截图并停止以生成清单。")
+    """根据 images/train 和 images/val 中的图片名，将 label txt 分发到对应目录。"""
+    if not IMAGES_TRAIN_DIR.exists() or not IMAGES_VAL_DIR.exists():
+        messagebox.showerror("错误", "图片目录不存在，请先截图并停止以完成分割。")
         return 0, 0
 
-    with open(TRAIN_LIST_FILE, "r", encoding="utf-8") as f:
-        train_names = json.load(f)
-    with open(VAL_LIST_FILE, "r", encoding="utf-8") as f:
-        val_names = json.load(f)
-
-    # 构建 图片名（无后缀）→ 集合
-    train_stems = {Path(n).stem for n in train_names}
-    val_stems = {Path(n).stem for n in val_names}
+    train_stems = {f.stem for f in IMAGES_TRAIN_DIR.iterdir() if f.suffix.lower() in (".png", ".jpg", ".jpeg")}
+    val_stems = {f.stem for f in IMAGES_VAL_DIR.iterdir() if f.suffix.lower() in (".png", ".jpg", ".jpeg")}
 
     LABELS_TRAIN_DIR.mkdir(parents=True, exist_ok=True)
     LABELS_VAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -707,29 +688,28 @@ class YOLOTrainerApp:
         global TRAIN_RATIO
         TRAIN_RATIO = train_pct / 100.0
 
-        train_names, val_names = split_images_to_dataset(out_dir)
+        train_images, val_images = split_images_to_dataset(out_dir)
 
         # 更新显示
-        total = len(train_names) + len(val_names)
+        total = len(train_images) + len(val_images)
         msg = (
             f"分割完成！共 {total} 张图片\n"
-            f"  images/train/ : {len(train_names)} 张\n"
-            f"  images/val/   : {len(val_names)} 张\n"
-            f"清单已保存到:\n"
-            f"  {TRAIN_LIST_FILE.name}\n"
-            f"  {VAL_LIST_FILE.name}"
+            f"  images/train/ : {len(train_images)} 张\n"
+            f"  images/val/   : {len(val_images)} 张"
         )
         self.lbl_split_result.config(text=msg)
 
         # 更新预览
-        self._update_train_list_preview(train_names, val_names)
+        self._update_train_list_preview(train_images, val_images)
 
         self.lbl_screenshot_status.config(
-            text=f"截图完成 + 自动分割 | train:{len(train_names)} / val:{len(val_names)}",
+            text=f"截图完成 + 自动分割 | train:{len(train_images)} / val:{len(val_images)}",
             fg="#27ae60",
         )
 
-    def _update_train_list_preview(self, train_names, val_names):
+    def _update_train_list_preview(self, train_images, val_images):
+        train_names = [img.name for img in train_images] if train_images else []
+        val_names = [img.name for img in val_images] if val_images else []
         self.train_list_text.config(state="normal")
         self.train_list_text.delete("1.0", tk.END)
         self.train_list_text.insert(tk.END, "=== 训练集 (train) ===\n")
@@ -831,22 +811,25 @@ class YOLOTrainerApp:
         self.label_preview_text.pack(padx=20, pady=(0, 8), fill="both", expand=True)
 
     def _refresh_checklist(self):
-        self._check_and_load_lists()
-        if TRAIN_LIST_FILE.exists():
-            with open(TRAIN_LIST_FILE, "r", encoding="utf-8") as f:
-                train_names = json.load(f)
-            self.lbl_train_count.config(text=f"训练集 (train): {len(train_names)} 张")
-        if VAL_LIST_FILE.exists():
-            with open(VAL_LIST_FILE, "r", encoding="utf-8") as f:
-                val_names = json.load(f)
-            self.lbl_val_count.config(text=f"验证集 (val): {len(val_names)} 张")
+        if IMAGES_TRAIN_DIR.exists():
+            train_count = len([f for f in IMAGES_TRAIN_DIR.iterdir()
+                               if f.suffix.lower() in (".png", ".jpg", ".jpeg")])
+            self.lbl_train_count.config(text=f"训练集 (train): {train_count} 张")
+        if IMAGES_VAL_DIR.exists():
+            val_count = len([f for f in IMAGES_VAL_DIR.iterdir()
+                             if f.suffix.lower() in (".png", ".jpg", ".jpeg")])
+            self.lbl_val_count.config(text=f"验证集 (val): {val_count} 张")
 
     def _check_and_load_lists(self):
-        """检查图片清单是否存在。"""
-        if not TRAIN_LIST_FILE.exists() or not VAL_LIST_FILE.exists():
+        """检查图片是否已分割到 images/train 和 images/val。"""
+        train_ok = IMAGES_TRAIN_DIR.exists() and any(
+            f.suffix.lower() in (".png", ".jpg", ".jpeg") for f in IMAGES_TRAIN_DIR.iterdir())
+        val_ok = IMAGES_VAL_DIR.exists() and any(
+            f.suffix.lower() in (".png", ".jpg", ".jpeg") for f in IMAGES_VAL_DIR.iterdir())
+        if not train_ok or not val_ok:
             messagebox.showwarning(
-                "缺少图片清单",
-                "图片清单不存在。\n请先在「开始截图」中截图并停止以生成清单。",
+                "缺少图片",
+                "images/train 或 images/val 中没有图片。\n请先在「开始截图」中截图并停止以自动分割。",
             )
             return False
         return True
@@ -862,8 +845,10 @@ class YOLOTrainerApp:
         self.lbl_label_result.config(text="正在处理...", fg="#2980b9")
         self.root.update_idletasks()
 
-        # 1. 先检查图片是否需要分割
-        if not TRAIN_LIST_FILE.exists() or not VAL_LIST_FILE.exists():
+        # 1. 先检查图片是否需要分割（以 images/train 中有图片为准）
+        train_has_images = IMAGES_TRAIN_DIR.exists() and any(
+            f.suffix.lower() in (".png", ".jpg", ".jpeg") for f in IMAGES_TRAIN_DIR.iterdir())
+        if not train_has_images:
             self.log_text.insert(tk.END, "[自动分配] 截图图片尚未分割，正在按比例分配...\n")
             self.log_text.see(tk.END)
             try:
@@ -876,11 +861,11 @@ class YOLOTrainerApp:
                 return
             global TRAIN_RATIO
             TRAIN_RATIO = train_pct / 100.0
-            train_names, val_names = split_images_to_dataset(OUTPUT_DIR)
-            self.lbl_train_count.config(text=f"训练集 (train): {len(train_names)} 张")
-            self.lbl_val_count.config(text=f"验证集 (val): {len(val_names)} 张")
-            self._update_train_list_preview(train_names, val_names)
-            self.log_text.insert(tk.END, f"  train: {len(train_names)} 张, val: {len(val_names)} 张\n\n")
+            train_images, val_images = split_images_to_dataset(OUTPUT_DIR)
+            self.lbl_train_count.config(text=f"训练集 (train): {len(train_images)} 张")
+            self.lbl_val_count.config(text=f"验证集 (val): {len(val_images)} 张")
+            self._update_train_list_preview(train_images, val_images)
+            self.log_text.insert(tk.END, f"  train: {len(train_images)} 张, val: {len(val_images)} 张\n\n")
             self.log_text.see(tk.END)
 
         # 2. 分发标记文件
