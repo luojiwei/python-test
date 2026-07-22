@@ -95,6 +95,7 @@ TRAIN_LIST_FILE = DATASET_DIR / "train_list.json"
 VAL_LIST_FILE = DATASET_DIR / "val_list.json"
 DATA_YAML = DATASET_DIR / "data.yaml"
 TRAIN_OUTPUT_DIR = PROJECT_DIR / "outputs"  # 训练结果输出目录
+TRAINED_MODELS_DIR = PROJECT_DIR / "trained_models"  # 归档目录
 
 WINDOW_TITLE = "WingsMs"
 TARGET_W, TARGET_H = 1280, 720
@@ -276,7 +277,6 @@ def split_images_to_dataset(screenshot_dir: Path):
     if not images:
         return [], []
 
-    random.seed(42)
     shuffled = images[:]
     random.shuffle(shuffled)
 
@@ -997,6 +997,7 @@ class YOLOTrainerApp:
             ("开始训练", "#4ecdc4", "#45b7af", self._run_train),
             ("验证模型", "#3498db", "#2980b9", self._run_validate),
             ("推理测试", "#9b59b6", "#8e44ad", self._run_predict),
+            ("保存成果", "#27ae60", "#1e8449", self._show_save_dialog),
             ("重新训练", "#e74c3c", "#c0392b", self._reset_training),
         ]
 
@@ -1004,8 +1005,8 @@ class YOLOTrainerApp:
             tk.Button(
                 btn_frame,
                 text=text,
-                font=("Microsoft YaHei", 11, "bold"),
-                width=10,
+                font=("Microsoft YaHei", 9, "bold"),
+                width=8,
                 height=1,
                 bg=bg,
                 fg="white",
@@ -1013,7 +1014,7 @@ class YOLOTrainerApp:
                 relief="flat",
                 cursor="hand2",
                 command=cmd,
-            ).pack(side="left", padx=5, pady=3)
+            ).pack(side="left", padx=2, pady=3)
 
         # ---- 训练日志 ----
         log_frame = tk.LabelFrame(tab, text="运行日志", font=("Microsoft YaHei", 10))
@@ -1103,6 +1104,91 @@ class YOLOTrainerApp:
         self.log_text.insert(tk.END, "\n[完成] 所有训练数据已清空，可以重新开始。\n\n")
         self.log_text.see(tk.END)
 
+    def _show_save_dialog(self):
+        """弹出保存成果对话框 — 输入地图名称后存到 trained_models/。"""
+        best_pt = TRAIN_OUTPUT_DIR / "results" / "train" / "weights" / "best.pt"
+        if not best_pt.exists():
+            alt_best = list(TRAIN_OUTPUT_DIR.glob("**/best.pt"))
+            if alt_best:
+                best_pt = alt_best[0]
+            else:
+                messagebox.showinfo("提示", "未找到训练结果 best.pt，请先完成训练")
+                return
+
+        win = tk.Toplevel(self.root)
+        win.title("保存训练成果")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+
+        f = tk.Frame(win, padx=20, pady=15)
+        f.pack()
+
+        tk.Label(f, text="训练完成！", font=("Microsoft YaHei", 12, "bold"),
+                 fg="#27ae60").pack(pady=(0, 10))
+
+        tk.Label(f, text="输入地图名称，将训练成果存入 trained_models/：",
+                 font=("Microsoft YaHei", 9)).pack()
+
+        name_var = tk.StringVar()
+        entry = tk.Entry(f, textvariable=name_var, font=("Microsoft YaHei", 11),
+                         width=24, justify="center")
+        entry.pack(pady=(8, 4))
+        entry.focus_set()
+        entry.bind("<Return>", lambda e: _confirm())
+
+        tk.Label(f, text=f"目标: trained_models/<地图名>/  (best.pt + data.yaml)",
+                 font=("Microsoft YaHei", 8), fg="#888").pack(pady=(0, 8))
+
+        bf = tk.Frame(f)
+        bf.pack()
+
+        def _confirm():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showwarning("提示", "请输入地图名称", parent=win)
+                return
+            self._do_save_trained_model(name, best_pt)
+            win.destroy()
+
+        tk.Button(bf, text="确认保存", font=("Microsoft YaHei", 10, "bold"),
+                  width=10, bg="#27ae60", fg="white", cursor="hand2",
+                  command=_confirm).pack(side="left", padx=4)
+
+        tk.Button(bf, text="放弃", font=("Microsoft YaHei", 10),
+                  width=8, bg="#95a5a6", fg="white", cursor="hand2",
+                  command=win.destroy).pack(side="left", padx=4)
+
+        self.root.wait_window(win)
+
+    def _do_save_trained_model(self, map_name: str, best_pt: Path):
+        """将 best.pt + data.yaml 复制到 trained_models/{map_name}/。"""
+        dest_dir = TRAINED_MODELS_DIR / map_name
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # 复制 best.pt
+        shutil.copy2(str(best_pt), str(dest_dir / "best.pt"))
+        self.log_text.insert(tk.END, f"  ✓ best.pt → {dest_dir / 'best.pt'}\n")
+
+        # 复制 data.yaml
+        if DATA_YAML.exists():
+            with open(DATA_YAML, "r", encoding="utf-8") as f:
+                yaml_content = f.read()
+            # 修正路径为部署时的相对路径
+            yaml_content = yaml_content.replace(
+                str(DATASET_DIR).replace("\\", "/"),
+                ".")
+            dest_yaml = dest_dir / "data.yaml"
+            with open(dest_yaml, "w", encoding="utf-8") as f:
+                f.write(yaml_content)
+            self.log_text.insert(tk.END, f"  ✓ data.yaml → {dest_yaml}\n")
+        else:
+            self.log_text.insert(tk.END, "  ⚠ data.yaml 不存在，仅保存了 best.pt\n")
+
+        self.log_text.insert(tk.END, f"\n[保存] 训练成果已存入 trained_models/{map_name}/\n\n")
+        self.log_text.see(tk.END)
+        messagebox.showinfo("保存完成", f"训练成果已保存到:\ntrained_models/{map_name}/")
+
     def _run_train(self):
         # 训练前自动从文本框生成 data.yaml
         if not self._save_classes_from_text():
@@ -1157,6 +1243,8 @@ class YOLOTrainerApp:
                 tk.END,
                 "\n[完成] 训练结束。模型保存在 outputs/results/train/weights/\n",
             )
+            self.root.after(0, self.log_text.see, tk.END)
+            self.root.after(500, self._show_save_dialog)
         else:
             self.root.after(
                 0,
