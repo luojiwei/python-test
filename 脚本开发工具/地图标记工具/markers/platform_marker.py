@@ -263,9 +263,38 @@ class PlatformMixin:
                     font=("Consolas", 9), text=f"P{i+1:03d}: ({x:>3}, {y:>3})",
                     command=refresh_preview)
                 chk.pack(side="left", padx=2)
+                btn_edit = tk.Button(row, text="✎", font=("Microsoft YaHei", 8),
+                    fg="#3498db", width=2, command=lambda idx=i: _edit_position(idx))
+                btn_edit.pack(side="right", padx=2)
                 btn = tk.Button(row, text="×", font=("Microsoft YaHei", 8, "bold"),
                     fg="#e74c3c", width=2, command=lambda idx=i: _remove_position(idx))
                 btn.pack(side="right", padx=2)
+
+        def _edit_position(idx):
+            """弹窗编辑选中位置的坐标。"""
+            x, y = positions[idx]
+            ew = tk.Toplevel(review_win)
+            ew.title(f"编辑坐标 P{idx+1:03d}")
+            ew.transient(review_win); ew.grab_set(); ew.resizable(False, False)
+            f = tk.Frame(ew, padx=15, pady=12); f.pack()
+            tk.Label(f, text="X:", font=("Microsoft YaHei", 9)).grid(row=0, column=0, sticky="e", padx=(0, 4))
+            x_var = tk.StringVar(value=str(x))
+            tk.Entry(f, textvariable=x_var, width=8, font=("Consolas", 10), justify="center").grid(row=0, column=1)
+            tk.Label(f, text="Y:", font=("Microsoft YaHei", 9)).grid(row=1, column=0, sticky="e", padx=(0, 4), pady=(6, 0))
+            y_var = tk.StringVar(value=str(y))
+            tk.Entry(f, textvariable=y_var, width=8, font=("Consolas", 10), justify="center").grid(row=1, column=1, pady=(6, 0))
+            def _apply():
+                try:
+                    nx, ny = int(x_var.get()), int(y_var.get())
+                except ValueError:
+                    self.status_text.set("坐标必须为整数"); return
+                positions[idx] = (nx, ny)
+                refresh_position_list()
+                refresh_preview()
+                ew.destroy()
+            bf = tk.Frame(f); bf.grid(row=2, column=0, columnspan=2, pady=(12, 0))
+            tk.Button(bf, text="确定", font=("Microsoft YaHei", 9, "bold"), width=6, bg="#4ecdc4", fg="white", command=_apply).pack(side="left", padx=4)
+            tk.Button(bf, text="取消", font=("Microsoft YaHei", 9), width=6, command=ew.destroy).pack(side="left", padx=4)
 
         def _remove_position(idx):
             nonlocal positions

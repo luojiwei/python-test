@@ -324,8 +324,12 @@ class FixedRouteStrategy(DecisionStrategy):
                                          patrol_direction, current_waypoint_idx,
                                          return_method, log_lines)
 
-        # 同平台移动
-        if ((mm_dx)**2 + (mm_dy)**2)**0.5 < 10:
+        # 到达判断：途经点无对应平台时只用水平距离（绳梯/跳跃锚点可能落在平台间隙）
+        if wp_platform is None and current_platform:
+            arrived = abs(mm_dx) < 10
+        else:
+            arrived = ((mm_dx)**2 + (mm_dy)**2)**0.5 < 10
+        if arrived:
             new_idx = (current_waypoint_idx + 1) % len(patrol_waypoints)
             log_lines.append(f"动作: 到达途经点{current_waypoint_idx}，前往{new_idx}")
             return IdleCommand(), patrol_direction, new_idx, "\n".join(log_lines)
