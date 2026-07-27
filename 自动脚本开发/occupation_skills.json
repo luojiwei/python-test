@@ -1,0 +1,49 @@
+{
+  "战士": {
+    "single_skills": [
+      {"name": "强力攻击", "range": 30}
+    ],
+    "aoe_skills": [
+      {"name": "群体攻击", "range": 30}
+    ],
+    "fullscreen_skills": [
+    ]
+  },
+  "魔法师": {
+    "single_skills": [
+      {"name": "魔力双击", "range": 120}
+    ],
+    "aoe_skills": [
+      {"name": "雷电术", "range": 80}
+    ],
+    "fullscreen_skills": [
+    ]
+  },
+  "弓箭手": {
+    "single_skills": [
+      {"name": "二连射", "range": 120}
+    ],
+    "aoe_skills": [
+      {"name": "爆炸箭", "range": 150}
+    ],
+    "fullscreen_skills": []
+  },
+  "飞侠": {
+    "single_skills": [
+      {"name": "双飞斩", "range": 120}
+    ],
+    "aoe_skills": [
+    ],
+    "fullscreen_skills": [
+    ]
+  },
+  "海盗": {
+    "single_skills": [
+      {"name": "双弹射击", "range": 120}
+    ],
+    "aoe_skills": [
+    ],
+    "fullscreen_skills": [
+    ]
+  }
+}

@@ -5029,7 +5029,7 @@
       },
       {
         "from": {
-          "x": 70,
+          "x": 72,
           "y": 30
         },
         "to": {
@@ -5046,13 +5046,13 @@
           "plat_0_L",
           "plat_0_R",
           "rope_0",
-          "plat_1_L",
+          "plat_1_R",
           "rope_1",
           "plat_5_R",
           "plat_5_L",
+          "jump_0",
           "plat_4_R",
-          "plat_4_L",
-          "plat_0_L"
+          "plat_4_L"
         ],
         "return_method": "下跳"
       }

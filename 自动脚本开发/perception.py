@@ -129,10 +129,10 @@ def detect_on_rope(wm, px: float, py: float, x_tolerance: int = 5) -> bool:
         y_min = min(rope_top_y, rope_bot_y)
         y_max = max(rope_top_y, rope_bot_y)
         if abs(px - rope_x) <= x_tolerance and y_min <= py <= y_max:
-            # 距离绳子两端在 3px 以内 → 可能在端点附近的平台上
-            if min(abs(py - y_min), abs(py - y_max)) <= 2:
+            # 距绳子两端 3px 以内且在平台上 → 不算绳梯（站在平台地面）
+            if min(abs(py - y_min), abs(py - y_max)) <= 3:
                 if wm.find_platform(px, py) is not None:
-                    continue  # 站在平台地面，不算绳梯
+                    continue
             return True
     return False
 

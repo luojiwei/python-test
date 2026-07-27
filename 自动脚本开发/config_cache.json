@@ -1,0 +1,15 @@
+{
+  "map": "东部岩山Ⅵ",
+  "window_title": "WingsMs",
+  "occupation": "弓箭手",
+  "single_skill": "二连射",
+  "aoe_skill": "爆炸箭",
+  "skill_rule": "mixed",
+  "single_skill_key": "Ctrl",
+  "aoe_skill_key": "Shift",
+  "normal_attack_key": "无",
+  "patrol_mode": "fixed_route",
+  "route_name": "默认巡逻路线",
+  "min_monsters": 3,
+  "debug_screenshot": true
+}

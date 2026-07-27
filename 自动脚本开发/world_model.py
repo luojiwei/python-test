@@ -17,15 +17,17 @@ class WorldModel:
     def find_platform(self, px: float, py: float) -> str | None:
         best_id, best = None, float("inf")
         for p in self.platforms:
-            lx = p["left_endpoint"]["x"] - 4
-            rx = p["right_endpoint"]["x"] + 4
+            lx = p["left_endpoint"]["x"] - 2
+            rx = p["right_endpoint"]["x"] + 2
             if not (lx <= px <= rx):
                 continue
-            pmin = p["min_y"] - 4
-            pmax = p["max_y"] + 4
+            pmin = p["min_y"] - 2
+            pmax = p["max_y"] + 2
             if not (pmin <= py <= pmax):
                 continue
-            dist = abs(py - p["avg_y"])
+            cx = (p["left_endpoint"]["x"] + p["right_endpoint"]["x"]) / 2
+            cy = p["avg_y"]
+            dist = ((px - cx)**2 + (py - cy)**2)**0.5
             if dist < best:
                 best, best_id = dist, p["id"]
         return best_id
@@ -93,14 +95,37 @@ class WorldModel:
 
     def get_exit_minimap_x(self, edge: dict) -> float:
         if edge["type"] == EdgeType.ROPE:
-            return edge.get("to_pt", {}).get("x", 0)
-        # jump / flash: 用 to 字段
+            if edge.get("direction") == "up":
+                return float(edge.get("top", {}).get("x", 0))
+            else:
+                return float(edge.get("bottom", {}).get("x", 0))
         return edge.get("to", {}).get("x", 0)
 
     def get_exit_target_y(self, edge: dict) -> float | None:
         if edge["type"] != EdgeType.ROPE:
             return None
-        return edge.get("to_pt", {}).get("y")
+        if edge.get("direction") == "up":
+            return edge.get("top", {}).get("y")
+        else:
+            return edge.get("bottom", {}).get("y")
+
+    def find_shortest_path(self, from_pid: str, to_pid: str) -> list[dict]:
+        """BFS 寻路：返回从 from_pid 到 to_pid 的最短边序列。未找到返回空列表。"""
+        if from_pid == to_pid:
+            return []
+        visited: set[str] = {from_pid}
+        queue: list[tuple[str, list[dict]]] = [(from_pid, [])]
+        for cur, path in queue:
+            for e in self.adjacency.get(cur, []):
+                nxt: str = e.get("to_platform", "")
+                if nxt in visited:
+                    continue
+                new_path: list[dict] = path + [e]
+                if nxt == to_pid:
+                    return new_path
+                visited.add(nxt)
+                queue.append((nxt, new_path))
+        return []
 
 
 def load_world_model(path: str) -> WorldModel:

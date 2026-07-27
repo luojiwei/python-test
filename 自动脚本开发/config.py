@@ -69,11 +69,16 @@ VK_ALT, VK_CTRL, VK_DOWN = 0x12, 0x11, 0x28
 SCAN_LEFT, SCAN_UP, SCAN_RIGHT = 0x4B, 0x48, 0x4D
 SCAN_ALT, SCAN_CTRL, SCAN_DOWN = 0x38, 0x1D, 0x50
 
+VK_SHIFT = 0xA0
+SCAN_SHIFT = 0x2A
+
 KEY_MAP: dict[str, tuple[int, int]] = {
     # 移动 / 攻击
     'l': (VK_LEFT, SCAN_LEFT), 'r': (VK_RIGHT, SCAN_RIGHT),
     'u': (VK_UP, SCAN_UP), 'd': (VK_DOWN, SCAN_DOWN),
     'j': (VK_ALT, SCAN_ALT), 'a': (VK_CTRL, SCAN_CTRL),
+    # 修饰键
+    'ctrl': (VK_CTRL, SCAN_CTRL), 'shift': (VK_SHIFT, SCAN_SHIFT),
     # Buff 键位
     'pgup': (0x21, 0x49), 'pgdn': (0x22, 0x51),
     'home': (0x24, 0x00), 'end':   (0x23, 0x4F),
@@ -98,6 +103,8 @@ KEY_MAP: dict[str, tuple[int, int]] = {
 
 # Buff 键位下拉选项 (显示名, 内部键名)
 SKILL_KEY_CHOICES: list[tuple[str, str]] = [
+    ("无", ""),
+    ("Ctrl", "ctrl"), ("Shift", "shift"),
     ("PageUp", "pgup"), ("PageDown", "pgdn"),
     ("Home", "home"), ("End", "end"),
     ("Insert", "ins"), ("Delete", "del"),
@@ -120,6 +127,29 @@ SKILL_KEY_LOOKUP: dict[str, str] = {d: i for d, i in SKILL_KEY_CHOICES}
 
 # 技能安全余量：在技能到期前 N 秒提前刷新
 SKILL_SAFETY_MARGIN: float = 5.0
+
+# ============================================================
+# 职业配置
+# ============================================================
+
+SKILL_RULE_CHOICES: list[tuple[str, str]] = [
+    ("混合使用", "mixed"),
+    ("只用单体", "single"),
+    ("只用群体", "aoe"),
+]
+SKILL_RULE_DISPLAY_TO_CODE: dict[str, str] = {d: c for d, c in SKILL_RULE_CHOICES}
+SKILL_RULE_CODE_TO_DISPLAY: dict[str, str] = {c: d for d, c in SKILL_RULE_CHOICES}
+
+
+def _load_occupation_data() -> dict[str, dict]:
+    """从 occupation_skills.json 加载职业技能模板。"""
+    import json
+    json_path = Path(__file__).parent / "occupation_skills.json"
+    with open(json_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+OCCUPATION_DATA: dict[str, dict] = _load_occupation_data()
 
 # ============================================================
 # YOLO 类别（运行时从模型读取）

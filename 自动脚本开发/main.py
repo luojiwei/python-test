@@ -25,16 +25,20 @@ from config import (
     PROJECT_DIR, WINDOW_TITLE,
     PERCEPTION_INTERVAL, TICK_INTERVAL, LOGIC_INTERVAL,
     ATTACK_DISTANCE, ATTACK_VERTICAL, PLATFORM_TOLERANCE,
+    OCCUPATION_DATA, SKILL_RULE_CHOICES,
+    SKILL_RULE_DISPLAY_TO_CODE, SKILL_RULE_CODE_TO_DISPLAY,
+    SKILL_KEY_CHOICES, SKILL_KEY_LOOKUP,
     discover_maps,
 )
 from input_utils import (
     KeySender, find_window_by_title, capture_frame,
+    enum_visible_windows,
 )
 from perception import (
     GameState, Calibrator,
 )
 from world_model import WorldModel
-from commands import Command, ClimbCommand, decide
+from commands import Command, ClimbCommand, decide, TimedAttackCommand, TurnAndAttackCommand
 from key_actions import KeyActionManager
 from map_loader import MapLoader
 from perception_pipeline import PerceptionPipeline
@@ -86,7 +90,25 @@ class AutoFarmV2App:
         self._last_perception: float = 0.0
         self._facing_stuck_since: float = 0.0      # 同朝向持续时间
         self._facing_last_count: int = 0            # 上次怪物数
+        self._run_start_time: float = 0.0           # 运行开始时间
         self.wm: WorldModel | None = None
+
+        # --- 职业配置 ---
+        self.occupation_var = tk.StringVar(value="")
+        self.single_skill_var = tk.StringVar(value="")
+        self.aoe_skill_var = tk.StringVar(value="")
+        self.skill_rule_var = tk.StringVar(value=SKILL_RULE_CODE_TO_DISPLAY["mixed"])
+        self.single_skill_key_var = tk.StringVar(value="")
+        self.aoe_skill_key_var = tk.StringVar(value="")
+        self.normal_attack_key_var = tk.StringVar(value="Ctrl")
+        self._single_skill_combo = None
+        self._aoe_skill_combo = None
+        self._single_key_combo = None
+        self._aoe_key_combo = None
+
+        # --- 调试截图开关 ---
+        self._debug_enabled: bool = True
+        self._window_map: dict[str, int] = {}  # 窗口标题 → hwnd
 
         # --- 决策配置 ---
         self.min_monsters_var = tk.IntVar(value=3)
@@ -122,27 +144,46 @@ class AutoFarmV2App:
         # Tab 1: 配置
         # ========================
 
+        # --- 地图配置 ---
+        self._build_map_config(config_tab)
+
+        # --- 职业配置 ---
+        self._build_occupation_config(config_tab)
+
         # --- 顶部：技能面板 ---
         self.skills.build_panel(config_tab)
 
-        # 尝试加载缓存配置
-        cache_path = PROJECT_DIR / "skill_config.json"
+        # --- 加载缓存配置 ---
+        self._config_cache_path: Path = PROJECT_DIR / "config_cache.json"
         cached_skills = SkillManager.load_cached_skills()
-        cached_map: str = ""
-        cached_decision: dict = {}
-        if cache_path.exists():
-            try:
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    cache_data = json.load(f)
-                if isinstance(cache_data, dict):
-                    cached_map = cache_data.get("map", "")
-                    cached_decision = {
-                        "patrol_mode": cache_data.get("patrol_mode", "auto_hunt"),
-                        "route_name": cache_data.get("route_name", ""),
-                        "min_monsters": cache_data.get("min_monsters", 3),
-                    }
-            except Exception:
-                pass
+        cache = self._load_config()
+        cached_occ = cache.get("occupation", "")
+        cached_single = cache.get("single_skill", "")
+        cached_aoe = cache.get("aoe_skill", "")
+        cached_single_key = cache.get("single_skill_key", "")
+        cached_aoe_key = cache.get("aoe_skill_key", "")
+        cached_rule_code = cache.get("skill_rule", "mixed")
+        if cached_occ and cached_occ in OCCUPATION_DATA:
+            self.occupation_var.set(cached_occ)
+            self._on_occupation_change()
+            occ_data = OCCUPATION_DATA[cached_occ]
+            valid_single = [s["name"] for s in occ_data.get("single_skills", [])]
+            valid_aoe = [s["name"] for s in occ_data.get("aoe_skills", [])] + \
+                        [s["name"] for s in occ_data.get("fullscreen_skills", [])]
+            if cached_single in valid_single:
+                self.single_skill_var.set(cached_single)
+            if cached_aoe in valid_aoe:
+                self.aoe_skill_var.set(cached_aoe)
+            if cached_single_key:
+                valid_keys = [d for d, _ in SKILL_KEY_CHOICES]
+                if cached_single_key in valid_keys:
+                    self.single_skill_key_var.set(cached_single_key)
+            if cached_aoe_key:
+                valid_keys = [d for d, _ in SKILL_KEY_CHOICES]
+                if cached_aoe_key in valid_keys:
+                    self.aoe_skill_key_var.set(cached_aoe_key)
+        if cached_rule_code in SKILL_RULE_CODE_TO_DISPLAY:
+            self.skill_rule_var.set(SKILL_RULE_CODE_TO_DISPLAY[cached_rule_code])
 
         if cached_skills:
             for item in cached_skills:
@@ -160,6 +201,7 @@ class AutoFarmV2App:
         self._build_decision_config(config_tab)
 
         # 恢复缓存地图
+        cached_map = cache.get("map", "")
         if cached_map and hasattr(self, 'map_var'):
             try:
                 self.map_var.set(cached_map)
@@ -167,15 +209,15 @@ class AutoFarmV2App:
                 pass
 
         # 恢复缓存的决策配置
-        if cached_decision:
-            try:
-                self.patrol_mode_var.set(cached_decision.get("patrol_mode", "auto_hunt"))
-                self.min_monsters_var.set(int(cached_decision.get("min_monsters", 3)))
-                self._on_patrol_mode_change()  # 根据 patrol_mode 显示对应面板
-                if cached_decision.get("route_name"):
-                    self._route_dropdown_var.set(cached_decision["route_name"])
-            except Exception:
-                pass
+        try:
+            self.patrol_mode_var.set(cache.get("patrol_mode", "auto_hunt"))
+            self.min_monsters_var.set(int(cache.get("min_monsters", 3)))
+            self._on_patrol_mode_change()
+            route_name = cache.get("route_name", "")
+            if route_name:
+                self._route_dropdown_var.set(route_name)
+        except Exception:
+            pass
 
         # ========================
         # Tab 2: 日志
@@ -203,6 +245,34 @@ class AutoFarmV2App:
         tk.Label(root, text="⚠ 运行中请勿操作键盘，点停止会释放所有按键",
                  font=("Microsoft YaHei", 7), fg="#f39c12").pack(pady=(0, 3))
 
+        # --- 恢复缓存配置并注册自动保存 ---
+        self._restore_and_trace_config()
+
+    def _restore_and_trace_config(self) -> None:
+        """从缓存恢复所有配置项，并注册变更自动保存。"""
+        cache = self._load_config()
+
+        # 调试截图
+        debug_val = cache.get("debug_screenshot", True)
+        self._debug_enabled = debug_val
+        self._debug_var.set(debug_val)
+
+        # 游戏窗口
+        cached_win = cache.get("window_title", "WingsMs")
+        self.window_var.set(cached_win)
+
+        # 普通攻击键位
+        self.normal_attack_key_var.set(cache.get("normal_attack_key", "Ctrl"))
+
+        # 注册自动保存 trace
+        _save = lambda *_: self._save_config()
+        for var in (self.occupation_var, self.single_skill_var, self.aoe_skill_var,
+                     self.skill_rule_var, self.single_skill_key_var,
+                     self.aoe_skill_key_var, self.normal_attack_key_var,
+                     self.min_monsters_var, self.patrol_mode_var,
+                     self._route_dropdown_var, self.map_var, self.window_var):
+            var.trace_add("write", _save)
+
     # --- 线程安全的日志输出 ---
 
     _decision_seq: int = 0  # 决策序号
@@ -218,25 +288,31 @@ class AutoFarmV2App:
             pass
 
     def _log_decision(self, text: str) -> None:
-        self._log_to_file(f"[决策] {text}")
+        import datetime
+        ts: str = datetime.datetime.now().strftime("%H:%M:%S")
+        self._log_to_file(f"[{ts}][决策] {text}")
         def _write() -> None:
-            self._decision_seq += 1
             self.log_text.config(state="normal")
-            # 保留最近 200 行防止内存暴涨
             lines = int(self.log_text.index("end-1c").split(".")[0])
             if lines > 200:
                 self.log_text.delete("1.0", f"{lines - 200}.0")
-            self.log_text.insert("end", f"\n── #{self._decision_seq} ──\n{text}\n")
-            self.log_text.see("end")
+            was_at_bottom: bool = self.log_text.yview()[1] >= 0.99
+            self.log_text.insert("end", f"\n── {ts} ──\n{text}\n")
+            if was_at_bottom:
+                self.log_text.see("end")
             self.log_text.config(state="disabled")
         self.root.after(0, _write)
 
     def _log_error(self, text: str) -> None:
-        self._log_to_file(f"[运行] {text}")
+        import datetime
+        ts: str = datetime.datetime.now().strftime("%H:%M:%S")
+        self._log_to_file(f"[{ts}] {text}")
         def _write() -> None:
             self.err_text.config(state="normal")
-            self.err_text.insert("end", f"{text}\n")
-            self.err_text.see("end")
+            was_at_bottom: bool = self.err_text.yview()[1] >= 0.99
+            self.err_text.insert("end", f"[{ts}] {text}\n")
+            if was_at_bottom:
+                self.err_text.see("end")
             self.err_text.config(state="disabled")
         self.root.after(0, _write)
 
@@ -267,16 +343,42 @@ class AutoFarmV2App:
     # --- 启动 ---
 
     def start(self) -> None:
-        win = find_window_by_title(WINDOW_TITLE)
-        if win is None:
-            self.status_var.set(f"未找到 '{WINDOW_TITLE}' 窗口")
-            return
-        self.target_hwnd, title, gl, gt, gr, gb = win
-        self.lbl_window.config(text=f"游戏: {title[:35]}  ({gr-gl}x{gb-gt})", fg="#333")
+        # 从下拉选择的窗口获取 hwnd
+        selected_title = self.window_var.get()
+        self._on_window_dropdown_click()  # 确保 _window_map 已刷新
+        target_hwnd = self._window_map.get(selected_title)
+        if target_hwnd is None:
+            win = find_window_by_title(selected_title)
+            if win is None:
+                self.status_var.set(f"未找到窗口: {selected_title}")
+                return
+            target_hwnd, title, gl, gt, gr, gb = win
+        else:
+            r = ctypes.wintypes.RECT()
+            ctypes.windll.user32.GetWindowRect(target_hwnd, ctypes.byref(r))
+            gl, gt, gr, gb = r.left, r.top, r.right, r.bottom
+            title = selected_title
+        self.target_hwnd = target_hwnd
+        self._run_start_time = time.time()
 
         map_name = self.map_var.get()
         if map_name.startswith("("):
-            self._update_status("请选择有效地图")
+            messagebox.showwarning("配置不完整", "请选择有效地图")
+            return
+
+        occupation = self.occupation_var.get()
+        if not occupation or occupation not in OCCUPATION_DATA:
+            messagebox.showwarning("配置不完整", "请先选择职业")
+            return
+        if not self.single_skill_var.get():
+            messagebox.showwarning("配置不完整", "请选择单体技能")
+            return
+        if not self.single_skill_key_var.get():
+            messagebox.showwarning("配置不完整", "请配置单体技能按键")
+            return
+        # 群体技能选了就必须配按键
+        if self.aoe_skill_var.get() and not self.aoe_skill_key_var.get():
+            messagebox.showwarning("配置不完整", "请配置群体技能按键")
             return
 
         selected_route = self._route_dropdown_var.get()
@@ -323,9 +425,13 @@ class AutoFarmV2App:
             self._log_error(f"  #{i} 名称={cfg['name']} 键位={cfg['key']} 持续={cfg['duration']}s")
 
         # 保存缓存
+        rule_code = SKILL_RULE_DISPLAY_TO_CODE.get(self.skill_rule_var.get(), "mixed")
         self.skills.save_cache(
             map_name, self.patrol_mode_var.get(),
-            self._route_dropdown_var.get(), self.min_monsters_var.get())
+            self._route_dropdown_var.get(), self.min_monsters_var.get(),
+            self.occupation_var.get(), self.single_skill_var.get(),
+            self.aoe_skill_var.get(), rule_code,
+            self.single_skill_key_var.get(), self.aoe_skill_key_var.get())
 
         # 启动时释放技能
         self.skills.initial_cast()
@@ -337,12 +443,13 @@ class AutoFarmV2App:
         self._patrol_direction = "up"
         self.transition.reset()
         self._current_command = None
-        self._current_waypoint_idx = 0
+        # 自动检测当前位置，匹配最近途经点
+        self._current_waypoint_idx = self._detect_start_waypoint()
         self._last_logic = time.time()
         self._last_perception = time.time()
         self.running = True
         self.btn.config(text="停止打怪", bg="#95a5a6", activebackground="#7f8c8d")
-        self._update_status("运行中...")
+        self._update_status(f"运行中—已运行0秒")
         # 清空上次运行日志
         try:
             with open(self._log_file, "w", encoding="utf-8") as _:
@@ -363,8 +470,10 @@ class AutoFarmV2App:
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=3)
         self.btn.config(text="开始打怪", bg="#e74c3c", activebackground="#c0392b")
-        self._update_status(f"已停止 — 共 {self.frame_count} 帧")
+        elapsed = time.time() - self._run_start_time
+        self._update_status(f"已停止—共运行{elapsed:.0f}秒")
         self._log_error("=== 脚本已停止，按键已释放 ===")
+        self._save_config()
 
     # --- 辅助方法 ---
 
@@ -380,6 +489,113 @@ class AutoFarmV2App:
                     return True
         return False
 
+    def _on_debug_toggle(self) -> None:
+        """调试截图开关回调。"""
+        self._debug_enabled = self._debug_var.get()
+        self._save_config()
+
+    def _on_window_dropdown_click(self, event=None) -> None:
+        """点击游戏窗口下拉时刷新窗口列表。"""
+        windows = enum_visible_windows()
+        titles = [title for _, title in windows]
+        self.window_combo["values"] = titles
+        self._window_map = {title: hwnd for hwnd, title in windows}
+
+    # --- 配置持久化 ---
+
+    def _load_config(self) -> dict:
+        """加载缓存配置，返回 dict。失败返回空 dict。"""
+        if not self._config_cache_path.exists():
+            return {}
+        try:
+            with open(self._config_cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_config(self) -> None:
+        """保存当前所有配置项到缓存文件。"""
+        try:
+            data = {
+                "map": getattr(self, 'map_var', tk.StringVar(value="")).get(),
+                "window_title": getattr(self, 'window_var', tk.StringVar(value="")).get(),
+                "occupation": self.occupation_var.get(),
+                "single_skill": self.single_skill_var.get(),
+                "aoe_skill": self.aoe_skill_var.get(),
+                "skill_rule": SKILL_RULE_DISPLAY_TO_CODE.get(
+                    self.skill_rule_var.get(), "mixed"),
+                "single_skill_key": self.single_skill_key_var.get(),
+                "aoe_skill_key": self.aoe_skill_key_var.get(),
+                "normal_attack_key": self.normal_attack_key_var.get(),
+                "patrol_mode": self.patrol_mode_var.get(),
+                "route_name": getattr(self, '_route_dropdown_var',
+                                      tk.StringVar(value="")).get(),
+                "min_monsters": self.min_monsters_var.get(),
+                "debug_screenshot": self._debug_enabled,
+            }
+            with open(self._config_cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass  # 保存失败不阻塞正常流程
+
+    def _detect_start_waypoint(self) -> int:
+        """启动时捕获一帧感知，找到角色最近的途经点索引，跳过已走过的。"""
+        wps = self._patrol_waypoints
+        if not wps or len(wps) < 2:
+            return 0
+        try:
+            frame = capture_frame(self.target_hwnd)
+            if frame is None:
+                return 0
+            self.perception.perceive(frame, self.state, self.target_hwnd, self.frame_count)
+            px: float = self.state.player_minimap_x
+            py: float = self.state.player_minimap_y
+            if px == 0 and py == 0:
+                return 0
+            best_idx: int = 0
+            best_dist: float = float("inf")
+            for i, (wx, wy) in enumerate(wps):
+                dist = ((wx - px) ** 2 + (wy - py) ** 2) ** 0.5
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+
+            # 跳过已走过的途经点：路线方向上角色已越过 nearest 则前进
+            idx = best_idx
+            while idx < len(wps) - 1:
+                wx1, _ = wps[idx]
+                wx2, _ = wps[idx + 1]
+                dx_route = wx2 - wx1
+                if dx_route > 5 and px > wx1 + 5:
+                    idx += 1  # 路线向右，角色在途经点右边 → 已走过
+                elif dx_route < -5 and px < wx1 - 5:
+                    idx += 1  # 路线向左，角色在途经点左边 → 已走过
+                else:
+                    break
+
+            if idx != best_idx:
+                self._log_error(f"[启动] 检测位置 ({px:.0f},{py:.0f})，最近 #{best_idx}，已走过 → 从 #{idx} 开始")
+            else:
+                self._log_error(f"[启动] 检测位置 ({px:.0f},{py:.0f})，最近途经点 #{best_idx} (距离={best_dist:.0f}px)")
+            return idx
+        except Exception as e:
+            self._log_error(f"[启动] 位置检测失败，从途经点0开始: {e}")
+            return 0
+
+    _debug_frame_seq: int = 0
+
+    def _save_debug_frame(self, frame: np.ndarray) -> None:
+        """保存游戏窗口截图到 debug_frames 目录，循环覆盖最近 20 帧。"""
+        import cv2
+        out_dir = Path(__file__).parent / "debug_frames"
+        out_dir.mkdir(exist_ok=True)
+        self._debug_frame_seq = (self._debug_frame_seq + 1) % 20
+        fname = out_dir / f"frame_{self._debug_frame_seq:02d}.png"
+        cv2.imwrite(str(fname), frame)
+
     # --- 主循环 ---
 
     def _loop(self) -> None:
@@ -389,6 +605,11 @@ class AutoFarmV2App:
         while self.running:
             t0 = time.time()
             self.frame_count += 1
+
+            # 每秒更新一次运行时长
+            if self.frame_count % 30 == 0:
+                elapsed = t0 - self._run_start_time
+                self._update_status(f"运行中—已运行{elapsed:.0f}秒")
 
             try:
                 if target_hwnd is None:
@@ -427,7 +648,9 @@ class AutoFarmV2App:
                             patrol_mode=self.patrol_mode_var.get(),
                             patrol_waypoints=self._patrol_waypoints,
                             current_waypoint_idx=self._current_waypoint_idx,
-                            return_method=self._patrol_return_method)
+                            return_method=self._patrol_return_method,
+                            get_skill_cb=self._get_effective_skill,
+                            log_cb=self._log_error)
 
                         if cmd is not None:
                             self._current_command = cmd
@@ -436,23 +659,28 @@ class AutoFarmV2App:
                         self._log_decision(log_text)
                     self._last_logic = now
 
-                    # 朝向僵死检测
-                    facing_now = self.state.facing
-                    same_plat_same_dir = [m for m in self.state.monsters
-                        if abs(m["y2"] - self.state.player_screen_y) <= PLATFORM_TOLERANCE
-                        and ((m["cx"] - self.state.player_screen_x >= 0) == (facing_now == 'r'))]
-                    mc_now = len(same_plat_same_dir)
-                    if mc_now == 0 or self._facing_stuck_since == 0.0 or mc_now < self._facing_last_count:
-                        self._facing_stuck_since = now
-                        self._facing_last_count = mc_now
-                    elif now - self._facing_stuck_since > 5.0 and facing_now in ('l', 'r'):
-                        self._facing_stuck_since = now
-                        self.actions.wake_up()
-                        self._log_error(f"朝向僵死检测: 5s同朝向({facing_now})怪物未减({mc_now}只)，重按{facing_now}+攻击校准")
+                    # 朝向僵死检测：YOLO 延迟导致背怪误判 → 暂时关闭
+                    # (保留代码以备后续修复感知延迟后重新启用)
+                    # facing_now = self.state.facing
+                    # same_plat_same_dir = [m for m in self.state.monsters
+                    #     if abs(m["y2"] - self.state.player_screen_y) <= PLATFORM_TOLERANCE
+                    #     and ((m["cx"] - self.state.player_screen_x >= 0) == (facing_now == 'r'))]
+                    # mc_now = len(same_plat_same_dir)
+                    # if mc_now == 0 or self._facing_stuck_since == 0.0 or mc_now < self._facing_last_count:
+                    #     self._facing_stuck_since = now
+                    #     self._facing_last_count = mc_now
+                    # elif now - self._facing_stuck_since > 5.0 and facing_now in ('l', 'r'):
+                    #     self._facing_stuck_since = now
+                    #     self.actions.wake_up()
+                    #     self._log_error(f"朝向僵死检测: 5s同朝向({facing_now})怪物未减({mc_now}只)")
 
                 # ---- 执行 (每 tick) ----
                 if self._current_command and wm:
                     self._current_command.execute_tick(self.actions, self.state, wm)
+
+                # ---- 调试截图 (每 tick) ----
+                if self._debug_enabled and frame is not None:
+                    self._save_debug_frame(frame)
 
             except Exception as e:
                 import traceback
@@ -468,7 +696,203 @@ class AutoFarmV2App:
 
         self.actions.force_release_all()
 
-    # --- 技能面板 & 计时器 ---
+    # --- 职业配置面板 ---
+
+    def _on_occupation_change(self, *args) -> None:
+        """职业名称变更时，重置所有技能及其按键配置。"""
+        occ_name = self.occupation_var.get()
+        if not occ_name or occ_name not in OCCUPATION_DATA:
+            self.single_skill_var.set("")
+            self.aoe_skill_var.set("")
+            self.single_skill_key_var.set("")
+            self.aoe_skill_key_var.set("")
+            if self._single_skill_combo:
+                self._single_skill_combo.config(state="disabled")
+            if self._aoe_skill_combo:
+                self._aoe_skill_combo.config(state="disabled")
+            if self._single_key_combo:
+                self._single_key_combo.config(state="disabled")
+            if self._aoe_key_combo:
+                self._aoe_key_combo.config(state="disabled")
+            return
+
+        data = OCCUPATION_DATA[occ_name]
+        single_names = [s["name"] for s in data.get("single_skills", [])]
+        aoe_names = [s["name"] for s in data.get("aoe_skills", [])]
+        full_names = [s["name"] for s in data.get("fullscreen_skills", [])]
+
+        if self._single_skill_combo:
+            self._single_skill_combo.config(state="readonly")
+            self._single_skill_combo["values"] = single_names
+            self.single_skill_var.set(single_names[0] if single_names else "")
+
+        if self._single_key_combo:
+            self._single_key_combo.config(state="readonly")
+
+        if self._aoe_skill_combo:
+            self._aoe_skill_combo.config(state="readonly")
+            self._aoe_skill_combo["values"] = aoe_names + full_names
+            self.aoe_skill_var.set(aoe_names[0] if aoe_names else (full_names[0] if full_names else ""))
+
+        if self._aoe_key_combo:
+            self._aoe_key_combo.config(state="readonly")
+
+        # 普通攻击键位：默认 Ctrl，如果被单体/群体技能占用则置空
+        used_keys = {self.single_skill_key_var.get(), self.aoe_skill_key_var.get()}
+        if "Ctrl" in used_keys:
+            self.normal_attack_key_var.set("")
+        else:
+            self.normal_attack_key_var.set("Ctrl")
+
+    def _build_map_config(self, parent: tk.Widget) -> None:
+        """构建地图配置面板（置于职业配置上方）。"""
+        panel = tk.LabelFrame(parent, text="地图配置",
+                               font=("Microsoft YaHei", 10, "bold"),
+                               padx=8, pady=5, fg="#2c3e50")
+        panel.pack(side="top", fill="x", padx=15, pady=(8, 2))
+
+        map_frame = tk.Frame(panel)
+        map_frame.pack(fill="x")
+
+        tk.Label(map_frame, text="地图:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 6))
+        map_names = discover_maps()
+        if not map_names:
+            map_names = ["(无可用地图)"]
+        self.map_var = tk.StringVar(value=map_names[0])
+        self.map_combo = ttk.Combobox(map_frame, textvariable=self.map_var,
+                                       values=map_names, state="readonly",
+                                       width=16, font=("Microsoft YaHei", 9))
+        self.map_combo.pack(side="left")
+
+    def _build_occupation_config(self, parent: tk.Widget) -> None:
+        """构建职业配置面板"""
+        panel = tk.LabelFrame(parent, text="职业配置",
+                               font=("Microsoft YaHei", 10, "bold"),
+                               padx=8, pady=5, fg="#2c3e50")
+        panel.pack(side="top", fill="x", padx=15, pady=(8, 2))
+
+        key_display_names = [d for d, _ in SKILL_KEY_CHOICES]
+
+        # 第一行：职业名称 + 技能释放规则
+        row1 = tk.Frame(panel)
+        row1.pack(fill="x", pady=(0, 2))
+
+        tk.Label(row1, text="职业名称:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
+        occ_names = list(OCCUPATION_DATA.keys())
+        self._occ_combo = ttk.Combobox(row1, textvariable=self.occupation_var,
+                                        values=occ_names, state="readonly",
+                                        width=10, font=("Microsoft YaHei", 9))
+        self._occ_combo.pack(side="left", padx=(0, 20))
+        self._occ_combo.bind("<<ComboboxSelected>>", self._on_occupation_change)
+
+        tk.Label(row1, text="技能释放规则:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
+        rule_display_names = [d for d, _ in SKILL_RULE_CHOICES]
+        self._rule_combo = ttk.Combobox(row1, textvariable=self.skill_rule_var,
+                                         values=rule_display_names, state="readonly",
+                                         width=10, font=("Microsoft YaHei", 9))
+        self._rule_combo.pack(side="left")
+
+        # 第二行：单体技能 + 按键
+        row2 = tk.Frame(panel)
+        row2.pack(fill="x", pady=(0, 2))
+
+        tk.Label(row2, text="单体技能:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
+        self._single_skill_combo = ttk.Combobox(row2, textvariable=self.single_skill_var,
+                                                 values=[], state="disabled",
+                                                 width=12, font=("Microsoft YaHei", 9))
+        self._single_skill_combo.pack(side="left")
+        tk.Label(row2, text=" 按键:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(4, 2))
+        self._single_key_combo = ttk.Combobox(row2, textvariable=self.single_skill_key_var,
+                                               values=key_display_names,
+                                               state="disabled", width=8,
+                                               font=("Microsoft YaHei", 9))
+        self._single_key_combo.pack(side="left")
+
+        # 第三行：群体技能 + 按键
+        row3 = tk.Frame(panel)
+        row3.pack(fill="x", pady=(0, 2))
+
+        tk.Label(row3, text="群体技能:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
+        self._aoe_skill_combo = ttk.Combobox(row3, textvariable=self.aoe_skill_var,
+                                              values=[], state="disabled",
+                                              width=12, font=("Microsoft YaHei", 9))
+        self._aoe_skill_combo.pack(side="left")
+        tk.Label(row3, text=" 按键:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(4, 2))
+        self._aoe_key_combo = ttk.Combobox(row3, textvariable=self.aoe_skill_key_var,
+                                            values=key_display_names,
+                                            state="disabled", width=8,
+                                            font=("Microsoft YaHei", 9))
+        self._aoe_key_combo.pack(side="left")
+
+        # 第四行：普通攻击 + 按键
+        row4 = tk.Frame(panel)
+        row4.pack(fill="x")
+
+        tk.Label(row4, text="普通攻击:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
+        self._normal_attack_label = tk.Label(row4, text="Ctrl",
+                                              font=("Microsoft YaHei", 9), fg="#555")
+        self._normal_attack_label.pack(side="left")
+        self._normal_attack_combo = ttk.Combobox(row4,
+                                                  textvariable=self.normal_attack_key_var,
+                                                  values=key_display_names,
+                                                  state="readonly", width=8,
+                                                  font=("Microsoft YaHei", 9))
+        self._normal_attack_combo.pack(side="left", padx=(4, 0))
+
+    def _get_skill_info(self, skill_name: str) -> dict | None:
+        """根据技能名在当前职业数据中查找完整信息。"""
+        occ = self.occupation_var.get()
+        if occ not in OCCUPATION_DATA:
+            return None
+        for cat in ("single_skills", "aoe_skills", "fullscreen_skills"):
+            for s in OCCUPATION_DATA[occ].get(cat, []):
+                if s["name"] == skill_name:
+                    return {"name": s["name"], "range": s.get("range", -1),
+                            "fullscreen": cat == "fullscreen_skills"}
+        return None
+
+    def _get_effective_skill(self, monster_count: int) -> dict:
+        """根据释放规则和怪物数返回应使用的技能。
+
+        返回 {"name": str|None, "key": str|None, "range": int, "fullscreen": bool}
+        """
+        rule_code = SKILL_RULE_DISPLAY_TO_CODE.get(self.skill_rule_var.get(), "mixed")
+        single_name = self.single_skill_var.get()
+        aoe_name = self.aoe_skill_var.get()
+        single_key = SKILL_KEY_LOOKUP.get(self.single_skill_key_var.get(), "")
+        aoe_key = SKILL_KEY_LOOKUP.get(self.aoe_skill_key_var.get(), "")
+
+        single_info = self._get_skill_info(single_name) or {}
+        aoe_info = self._get_skill_info(aoe_name) or {}
+        aoe_valid = aoe_name and aoe_name != "无"
+
+        def result(name, key, info):
+            return {"name": name or None, "key": key or None,
+                    "range": info.get("range", 0),
+                    "fullscreen": info.get("fullscreen", False)}
+
+        if rule_code == "single":
+            return result(single_name, single_key, single_info)
+        if rule_code == "aoe":
+            if aoe_valid:
+                return result(aoe_name, aoe_key, aoe_info)
+            return result(single_name, single_key, single_info)
+        # mixed
+        if monster_count <= 1:
+            return result(single_name, single_key, single_info)
+        if aoe_valid:
+            return result(aoe_name, aoe_key, aoe_info)
+        return result(single_name, single_key, single_info)
+
+    # --- Buff面板 & 计时器 ---
 
     def _build_decision_config(self, parent: tk.Widget) -> None:
         """构建决策配置面板"""
@@ -555,30 +979,24 @@ class AutoFarmV2App:
             self.status_var.set("自动寻怪模式已就绪")
 
     def _build_footer(self, parent: tk.Widget) -> None:
-        """构建底部 footer：游戏窗口、地图选择、开始按钮、状态"""
+        """构建底部 footer：游戏窗口选择、开始按钮、状态"""
         footer = tk.LabelFrame(parent, text="游戏控制",
                                 font=("Microsoft YaHei", 10, "bold"),
                                 padx=8, pady=5, fg="#2c3e50")
         footer.pack(side="bottom", fill="x", padx=15, pady=(5, 8))
 
-        # 上一行：窗口 + 地图 + 按钮
+        # 上一行：游戏窗口 + 按钮
         control_row = tk.Frame(footer)
         control_row.pack(fill="x", pady=(0, 4))
 
-        self.lbl_window = tk.Label(control_row, text="游戏: (未选择)",
-                                    font=("Microsoft YaHei", 9), fg="#888")
-        self.lbl_window.pack(side="left", padx=(0, 15))
-
-        map_frame = tk.Frame(control_row)
-        map_frame.pack(side="left", padx=(0, 15))
-        tk.Label(map_frame, text="地图:", font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 6))
-        map_names = discover_maps()
-        if not map_names:
-            map_names = ["(无可用地图)"]
-        self.map_var = tk.StringVar(value=map_names[0])
-        self.map_combo = tk.OptionMenu(map_frame, self.map_var, *map_names)
-        self.map_combo.config(font=("Microsoft YaHei", 9), width=14)
-        self.map_combo.pack(side="left")
+        tk.Label(control_row, text="游戏窗口:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
+        self.window_var = tk.StringVar(value="WingsMs")
+        self.window_combo = ttk.Combobox(control_row, textvariable=self.window_var,
+                                          values=["WingsMs"], state="readonly",
+                                          width=28, font=("Microsoft YaHei", 9))
+        self.window_combo.pack(side="left", padx=(0, 15))
+        self.window_combo.bind("<Button-1>", self._on_window_dropdown_click)
 
         self.btn = tk.Button(control_row, text="开始打怪",
                               font=("Microsoft YaHei", 12, "bold"),
@@ -588,6 +1006,14 @@ class AutoFarmV2App:
                               relief="flat", cursor="hand2",
                               command=self.toggle)
         self.btn.pack(side="right")
+
+        # 调试截图开关
+        self._debug_var = tk.BooleanVar(value=self._debug_enabled)
+        self._debug_cb = tk.Checkbutton(control_row, text="调试截图",
+                                         variable=self._debug_var,
+                                         font=("Microsoft YaHei", 8), fg="#888",
+                                         command=self._on_debug_toggle)
+        self._debug_cb.pack(side="right", padx=(0, 10))
 
         # 下一行：状态
         tk.Label(footer, textvariable=self.status_var,

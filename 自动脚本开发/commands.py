@@ -35,21 +35,22 @@ class Command:
 # ============================================================
 
 class AttackCommand(Command):
-    def __init__(self) -> None:
+    def __init__(self, skill_key: str = 'a') -> None:
+        self._key: str = skill_key
         self._last_attack: float = 0.0
 
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
         actions.stop()
         now = time.time()
         if now - self._last_attack >= ATTACK_PULSE:
-            actions.attack_tap()
+            actions.attack_tap(self._key)
             self._last_attack = now
 
 
 class TimedAttackCommand(Command):
     """固定路线专用：攻击0.3s后自动结束，由 decide() 重新评估。"""
-    def __init__(self) -> None:
-        self._attack: AttackCommand = AttackCommand()
+    def __init__(self, skill_key: str = 'a') -> None:
+        self._attack: AttackCommand = AttackCommand(skill_key)
         self._end_time: float = time.time() + 0.3
 
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
@@ -60,10 +61,10 @@ class TimedAttackCommand(Command):
 
 
 class TurnAndAttackCommand(Command):
-    def __init__(self, direction: str) -> None:
+    def __init__(self, direction: str, skill_key: str = 'a') -> None:
         self._direction = direction
         self._turned: bool = False
-        self._attack = AttackCommand()
+        self._attack = AttackCommand(skill_key)
 
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
         if not self._turned:
@@ -98,13 +99,15 @@ class MoveToCommand(Command):
 class ClimbCommand(Command):
     def __init__(self, direction: str, rope_x: float, target_y: float,
                  departure_y: float = 0.0, timeout: float = CLIMB_TIMEOUT,
-                 target_platform: str = ""):
+                 target_platform: str = "", log_cb=None):
         self._direction = direction
         self._rope_x = rope_x
         self._target_y = target_y
         self._target_platform = target_platform
         self._departure_y = departure_y
         self._timeout = timeout
+        self._log = log_cb or (lambda s: None)
+        self._last_move_log: float = 0.0   # 移动日志节流
         self._start_time: float = time.time()
         self._cstate: str = "turn"       # turn → move → mount → climb → finish
         self._turn_time: float = 0.0
@@ -113,6 +116,7 @@ class ClimbCommand(Command):
         self._mount_time: float = 0.0
         self._finish_time: float = 0.0
         self._finished: bool = False
+        self._log(f"[爬梯] 创建: dir={direction} rope_x={rope_x:.0f} target_y={target_y:.0f} dep_y={departure_y:.0f}")
 
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
         px, py = state.player_minimap_x, state.player_minimap_y
@@ -126,20 +130,23 @@ class ClimbCommand(Command):
             return
 
         if self._cstate == "turn":
-            move_dir = 'r' if dx > 0 else 'l'
+            move_dir = 'r' if dx >= 0 else 'l'
             if state.facing and state.facing != move_dir:
                 if self._turn_time == 0.0:
                     self._turn_time = now
+                    self._log(f"[爬梯] turn: dx={dx:.0f} facing={state.facing} → tap {move_dir}")
                     actions.release_all()
                     actions.tap(move_dir, duration=0.05)
                 elif now - self._turn_time > 0.18:
                     self._cstate = "move"
+                    self._log(f"[爬梯] turn→move")
                     state.facing = move_dir
             else:
                 self._cstate = "move"
+                self._log(f"[爬梯] turn: dx={dx:.0f} facing={state.facing} matched → skip to move")
 
         if self._cstate == "move":
-            move_dir = 'r' if dx > 0 else 'l'
+            move_dir = 'r' if dx >= 0 else 'l'
             if going_up:
                 sign = 1 if move_dir == 'r' else -1
                 at_position = abs(dx - sign * 2) <= POSITION_THRESHOLD
@@ -149,21 +156,27 @@ class ClimbCommand(Command):
             if at_position:
                 if self._settle_time == 0.0:
                     self._settle_time = now
+                    self._log(f"[爬梯] move: at_position dx={dx:.0f} → settle")
                     actions.release_all()
                 elif now - self._settle_time > 0.15:
                     self._cstate = "mount"; self._mount_time = now
+                    self._log(f"[爬梯] move→mount jump_up({move_dir})")
                     if going_up:
                         actions.jump_up(move_dir)
                     else:
                         actions.climb_down()
             else:
                 self._settle_time = 0.0
+                if now - self._last_move_log >= 1.0:
+                    self._log(f"[爬梯] move: dx={dx:.0f} → walk {move_dir}")
+                    self._last_move_log = now
                 actions.move(move_dir)
 
         elif self._cstate == "mount":
             if going_up:
                 if now - self._mount_time > MOUNT_DURATION:
                     self._cstate = "climb"; actions.climb_up()
+                    self._log(f"[爬梯] mount→climb")
             else:
                 if now - self._mount_time > 0.3:
                     self._cstate = "climb"; actions.climb_down()
@@ -174,11 +187,14 @@ class ClimbCommand(Command):
                 if py <= self._target_y:
                     if self._reached_top_time == 0.0:
                         self._reached_top_time = now
+                        self._log(f"[爬梯] climb: reached top py={py:.0f} target={self._target_y:.0f}")
                     elif now - self._reached_top_time > CLIMB_OVERSHOOT:
                         self._cstate = "finish"; self._finish_time = now
+                        self._log(f"[爬梯] climb→finish")
                         actions.release_all()
-                else:
-                    self._reached_top_time = 0.0
+                elif self._reached_top_time == 0.0:
+                    self._reached_top_time = 0.0  # 正常爬梯中，无变化
+                # 已开始 overshoot 计时 → 不重置（py 短暂弹动是正常的）
             else:
                 actions.climb_down()
                 if py >= self._target_y - 3:
@@ -201,6 +217,7 @@ class ClimbCommand(Command):
 
     def is_on_rope(self, py: float) -> bool:
         """判断角色是否还在绳梯范围内"""
+        
         # overshoot 期间角色有意爬过绳梯顶端，仍视为"在绳梯上"
         if self._cstate == "climb" and self._reached_top_time > 0:
             return True
@@ -330,13 +347,12 @@ def decide(state: GameState, wm: WorldModel,
            patrol_mode: str = "auto_hunt",
            patrol_waypoints: list | None = None,
            current_waypoint_idx: int = 0,
-           return_method: str = "一直走") -> tuple[Command, str, int, str]:
-    """决策调度器：根据 patrol_mode 分发到对应策略。
-
-    新决策模式只需在 decision_strategies.STRATEGIES 中注册即可。
-    """
-    from decision_strategies import STRATEGIES
-    strategy = STRATEGIES.get(patrol_mode, STRATEGIES.get("auto_hunt"))
+           return_method: str = "一直走",
+           get_skill_cb=None, log_cb=None) -> tuple[Command, str, int, str]:
+    """决策调度器。get_skill_cb(monster_count) -> {"name","key","range","fullscreen"}"""
+    from decision_strategies import STRATEGIES, create_strategies
+    strategies = create_strategies(get_skill_cb, log_cb=log_cb) if get_skill_cb or log_cb else STRATEGIES
+    strategy = strategies.get(patrol_mode, strategies.get("auto_hunt"))
     if strategy is None:
         return IdleCommand(), patrol_direction, current_waypoint_idx, "无匹配策略"
     return strategy.decide(

@@ -93,8 +93,7 @@ class PerceptionPipeline:
                 state.player_minimap_x = dot[0]
                 state.player_minimap_y = dot[1]
                 pid = self.wm.find_platform(dot[0], dot[1])
-                if pid:
-                    state.current_platform = pid
+                state.current_platform = pid  # 允许为 None，防止残留旧平台
 
                 was_on_rope = state.on_rope
                 if detect_on_rope(self.wm, dot[0], dot[1]):

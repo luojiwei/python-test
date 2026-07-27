@@ -148,3 +148,24 @@ def capture_minimap(hwnd: int, mm_region: tuple[int, ...]) -> np.ndarray | None:
             return np.array(sct.grab(region))[:, :, :3]
     except Exception:
         return None
+
+
+def enum_visible_windows() -> list[tuple[int, str]]:
+    """枚举所有可见窗口，返回 [(hwnd, title), ...] 按标题排序。"""
+    results: list[tuple[int, str]] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def _enum_proc(hwnd: int, _lparam: int) -> bool:
+        if ctypes.windll.user32.IsWindowVisible(hwnd):
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value
+                if title.strip():
+                    results.append((hwnd, title))
+        return True
+
+    ctypes.windll.user32.EnumWindows(_enum_proc, 0)
+    results.sort(key=lambda x: x[1].lower())
+    return results

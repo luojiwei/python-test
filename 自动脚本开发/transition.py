@@ -62,13 +62,14 @@ class TransitionController:
         from commands import ClimbCommand
         finished = command.is_finished()
         is_climb = isinstance(command, ClimbCommand)
-        off_rope = is_climb and not command.is_on_rope(player_y)
+        off_rope = is_climb and command._cstate == "climb" and not command.is_on_rope(player_y)
 
         if finished or off_rope:
             self.in_progress = False
-            self.actions.turn(random.choice(('l', 'r')))
-            self._log("到达目标平台，重置朝向↗，重新决策")
-            return TransitionResult(action="complete", log_message="到达目标平台，重置朝向")
+            if self._nearby_monster():
+                self.actions.turn(random.choice(('l', 'r')))
+                return TransitionResult(action="complete", log_message="到达目标平台，附近有怪，重置朝向")
+            return TransitionResult(action="complete", log_message="到达目标平台，附近无怪，无需重置朝向")
 
         if is_climb and not command.is_on_rope(player_y) and self._nearby_monster():
             self.in_progress = False

@@ -43,6 +43,17 @@ class KeyActionManager:
         self.keys: KeySender = keys
         self.state: GameState = state
         self._log: Callable[[str], None] = log_cb or (lambda msg: None)
+        self._last_action_time: float = 0.0
+        self._last_action_msg: str = ""
+
+    def _throttled_log(self, msg: str) -> None:
+        """相同动作日志每秒最多输出一条。"""
+        now: float = time.time()
+        if msg == self._last_action_msg and now - self._last_action_time < 1.0:
+            return
+        self._last_action_msg = msg
+        self._last_action_time = now
+        self._log(msg)
 
     # ---- 基础操作 ----
 
@@ -74,7 +85,7 @@ class KeyActionManager:
         prev = self.state.facing
         self.state.facing = direction
         if prev != direction:
-            self._log(f"转向 {DIR_CN.get(direction, direction)}")
+            self._throttled_log(f"转向 {DIR_CN.get(direction, direction)}")
 
     def move_no_facing(self, direction: str) -> None:
         """朝指定方向行走但不更新朝向（适用于巡逻命令）。"""
@@ -85,32 +96,36 @@ class KeyActionManager:
         self.keys.hold_only(())
         self.keys.tap(direction, duration=TURN_TAP_MS)
         self.state.facing = direction
-        self._log(f"原地转向 {DIR_CN.get(direction, direction)}")
+        self._throttled_log(f"原地转向 {DIR_CN.get(direction, direction)}")
 
     def jump(self, direction: str) -> None:
         """跳跃+方向移动，同步朝向。"""
         self.keys.hold_only(('j', direction))
         self.state.facing = direction
-        self._log(f"跳跃 {DIR_CN.get(direction, direction)}")
+        self._throttled_log(f"跳跃 {DIR_CN.get(direction, direction)}")
 
     def jump_up(self, direction: str) -> None:
-        """上跳+方向（用于上绳梯时的 mount 阶段）。"""
+        """上跳+方向。"""
         self.keys.hold_only(('j', 'u', direction))
         self.state.facing = direction
+        self._throttled_log(f"上跳 {DIR_CN.get(direction, direction)}")
 
     def climb_up(self) -> None:
         """爬梯上升。"""
         self.keys.hold_only(('u',))
+        self._throttled_log("按↑ 爬升")
 
     def climb_down(self) -> None:
         """爬梯下降。"""
         self.keys.hold_only(('d',))
+        self._throttled_log("按↓ 下降")
 
     # ---- 攻击 ----
 
-    def attack_tap(self) -> None:
-        """轻触攻击键（不停止移动，用于脉冲计时器）。"""
-        self.keys.tap('a', duration=ATTACK_TAP_MS)
+    def attack_tap(self, key: str = 'a') -> None:
+        """轻触技能键（默认 Ctrl 兼容旧逻辑）。"""
+        self.keys.tap(key, duration=ATTACK_TAP_MS)
+        self._throttled_log(f"攻击键 [{key}]")
 
     # ---- 技能 ----
 
@@ -119,14 +134,12 @@ class KeyActionManager:
         self.keys.release_all()
         time.sleep(SKILL_PRE_DELAY)
         self.keys.tap(key, duration=SKILL_TAP_MS)
-        self._log(f"释放技能 [{key}]")
+        self._throttled_log(f"释放技能 [{key}]")
 
     # ---- 僵死恢复 ----
 
     def wake_up(self) -> None:
-        """僵死恢复：重按当前朝向 + 补一次攻击。"""
+        """僵死恢复：重按当前朝向重置方向。"""
         facing = self.state.facing
         self.keys.tap(facing, duration=WAKE_TAP_MS)
-        time.sleep(WAKE_ATTACK_DELAY)
-        self.keys.tap('a', duration=ATTACK_TAP_MS)
-        self._log(f"僵死恢复 ({DIR_CN.get(facing, facing)}+攻击)")
+        self._throttled_log(f"僵死恢复 (重置朝向 {DIR_CN.get(facing, facing)})")

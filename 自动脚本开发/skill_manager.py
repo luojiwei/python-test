@@ -1,7 +1,7 @@
-"""skill_manager.py — 技能配置管理器。
+"""skill_manager.py — Buff配置管理器。
 
-封装技能 GUI 面板构建、配置读写、计时器释放、缓存持久化。
-从 main.py 中提取约 100 行技能相关逻辑。
+封装Buff GUI 面板构建、配置读写、计时器释放、缓存持久化。
+从 main.py 中提取约 100 行Buff相关逻辑。
 """
 
 import json
@@ -14,13 +14,13 @@ from config import PROJECT_DIR, SKILL_KEY_CHOICES, SKILL_KEY_LOOKUP, SKILL_SAFET
 
 
 class SkillManager:
-    """自动技能管理器。
+    """自动Buff管理器。
 
     职责：
     - build_panel(): 构建 2 列布局 GUI 面板
-    - 从 GUI 读取技能配置到内部列表
+    - 从 GUI 读取Buff配置到内部列表
     - 持久化到 skill_config.json
-    - 按间隔自动释放技能
+    - 按间隔自动释放Buff
     """
 
     def __init__(self, actions=None,   # KeyActionManager (按需传入)
@@ -34,7 +34,7 @@ class SkillManager:
         self._add_btn: tk.Button | None = None
         self._cols: list[tk.Frame] = []
 
-        # 非阻塞：技能动画锁定结束时间
+        # 非阻塞：Buff动画锁定结束时间
         self._animation_locked_until: float = 0.0
 
     # ---- 属性 ----
@@ -50,7 +50,7 @@ class SkillManager:
     # ---- GUI 构建 ----
 
     def build_panel(self, parent: tk.Widget) -> tk.LabelFrame:
-        """构建 2 列布局的自动技能面板，返回 panel Frame。"""
+        """构建 2 列布局的自动Buff面板，返回 panel Frame。"""
         panel = tk.LabelFrame(parent, text="自动技能",
                                font=("Microsoft YaHei", 10, "bold"),
                                padx=8, pady=5, fg="#2c3e50")
@@ -68,7 +68,7 @@ class SkillManager:
             hdr = tk.Frame(col)
             tk.Label(hdr, text="✓", width=2,
                      font=("Microsoft YaHei", 8, "bold")).pack(side="left")
-            tk.Label(hdr, text="技能名称", width=10, anchor="w",
+            tk.Label(hdr, text="Buff名称", width=10, anchor="w",
                      font=("Microsoft YaHei", 8, "bold")).pack(side="left", padx=2)
             tk.Label(hdr, text="键位", width=7,
                      font=("Microsoft YaHei", 8, "bold")).pack(side="left", padx=2)
@@ -78,7 +78,7 @@ class SkillManager:
 
         # 添加按钮
         btn_frame = tk.Frame(panel)
-        self._add_btn = tk.Button(btn_frame, text="+ 添加技能",
+        self._add_btn = tk.Button(btn_frame, text="+ 添加Buff",
                                    font=("Microsoft YaHei", 8),
                                    command=self.add_row)
         self._add_btn.pack(side="left")
@@ -90,7 +90,7 @@ class SkillManager:
 
     def add_row(self, name: str = "", key_display: str = "PageUp",
                 duration: str = "", enabled: bool = True) -> None:
-        """添加一行技能配置（左右交替）。"""
+        """添加一行Buff配置（左右交替）。"""
         if len(self._rows) >= 10:
             return
 
@@ -148,7 +148,7 @@ class SkillManager:
     # ---- 配置读写 ----
 
     def read_configs(self) -> list[dict]:
-        """从 GUI 读取技能配置到内部列表并返回。"""
+        """从 GUI 读取Buff配置到内部列表并返回。"""
         configs: list[dict] = []
         for row in self._rows:
             name = row["name_var"].get().strip()
@@ -168,14 +168,23 @@ class SkillManager:
         return configs
 
     def save_cache(self, map_name: str, patrol_mode: str,
-                   route_name: str, min_monsters: int) -> None:
-        """保存技能配置 + 决策配置 + 地图到缓存文件。"""
+                   route_name: str, min_monsters: int,
+                   occupation: str = "", single_skill: str = "",
+                   aoe_skill: str = "", skill_rule: str = "mixed",
+                   single_skill_key: str = "", aoe_skill_key: str = "") -> None:
+        """保存 Buff 配置 + 决策配置 + 职业配置 + 地图到缓存文件。"""
         cache_data = {
             "map": map_name,
             "skills": [],
             "patrol_mode": patrol_mode,
             "route_name": route_name,
             "min_monsters": min_monsters,
+            "occupation": occupation,
+            "single_skill": single_skill,
+            "aoe_skill": aoe_skill,
+            "single_skill_key": single_skill_key,
+            "aoe_skill_key": aoe_skill_key,
+            "skill_rule": skill_rule,
         }
         for row in self._rows:
             cache_data["skills"].append({
@@ -192,7 +201,7 @@ class SkillManager:
 
     @staticmethod
     def load_cached_skills() -> list[dict]:
-        """从缓存文件加载技能配置列表。"""
+        """从缓存文件加载Buff配置列表。"""
         cache_path = PROJECT_DIR / "skill_config.json"
         if not cache_path.exists():
             return []
@@ -208,12 +217,12 @@ class SkillManager:
     # ---- 运行时 ----
 
     def reset_timers(self) -> None:
-        """重置所有技能计时器。"""
+        """重置所有Buff计时器。"""
         self._last_cast.clear()
         self._animation_locked_until = 0.0
 
     def initial_cast(self, start_now: float | None = None) -> None:
-        """启动时释放所有有效技能一次。"""
+        """启动时释放所有有效Buff一次。"""
         if start_now is None:
             start_now = time.time()
         for i, cfg in enumerate(self._configs):
@@ -223,11 +232,11 @@ class SkillManager:
             if key and self.actions:
                 self.actions.tap(key, duration=0.05)
                 self._last_cast[i] = start_now
-                self._log(f"[技能] {cfg['name']} 初始释放 (键位:{key})")
+                self._log(f"[Buff] {cfg['name']} 初始释放 (键位:{key})")
                 time.sleep(1.0)  # 启动初始化阶段可以阻塞
 
     def process(self, now: float) -> None:
-        """检查并释放到期的技能（非阻塞）。
+        """检查并释放到期的Buff（非阻塞）。
 
         使用 _animation_locked_until 替代 time.sleep()，
         避免阻塞 30ms tick 循环。
@@ -235,7 +244,7 @@ class SkillManager:
         if self.actions is None:
             return
 
-        # 技能动画锁定中 → 等待
+        # Buff动画锁定中 → 等待
         if now < self._animation_locked_until:
             return
 
@@ -253,7 +262,7 @@ class SkillManager:
             if now - last >= interval:
                 self.actions.cast_skill(key)
                 self._last_cast[i] = now
-                self._log(f"[技能] {cfg['name']} 释放 (键位:{key}, 间隔:{interval:.0f}s)")
+                self._log(f"[Buff] {cfg['name']} 释放 (键位:{key}, 间隔:{interval:.0f}s)")
                 # 非阻塞：记录动画锁定结束时间（替代 time.sleep(0.3)）
                 self._animation_locked_until = now + 0.3
-                break  # 一次只释放一个技能
+                break  # 一次只释放一个Buff

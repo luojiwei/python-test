@@ -52,8 +52,10 @@ def open_model_generator(app) -> None:
         tx, ty = r["top"]["x"], r["top"]["y"]; bx, by = r["bottom"]["x"], r["bottom"]["y"]
         pt, pb = _find_platform(tx, ty), _find_platform(bx, by)
         if pt and pb and pt != pb:
-            _add("rope", pb, pt, direction="up", from_pt={"x": bx, "y": by}, to_pt={"x": tx, "y": ty})
-            _add("rope", pt, pb, direction="down", from_pt={"x": tx, "y": ty}, to_pt={"x": bx, "y": by})
+            _add("rope", pb, pt, direction="up",
+                 top={"x": tx, "y": ty}, bottom={"x": bx, "y": by})
+            _add("rope", pt, pb, direction="down",
+                 top={"x": tx, "y": ty}, bottom={"x": bx, "y": by})
     for j in jumps:
         ff, ft = j["from"], j["to"]; pf = _find_platform(ff["x"], ff["y"]); pt2 = _find_platform(ft["x"], ft["y"])
         if pf and pt2 and pf == pt2: pt2 = _find_platform(ft["x"], ft["y"], exclude=pf)
@@ -104,9 +106,14 @@ def open_model_generator(app) -> None:
             tc = (255, 200, 50) if hi else (255, 255, 255)
             draw.text((cx - 10, cy - 8), lbl, fill=tc, font=fnt)
         for i, e in enumerate(edir):
-            fp, tp = e.get("from_pt", {}), e.get("to_pt", {})
-            x1, y1 = int(fp.get("x", 0) * rx), int(fp.get("y", 0) * ry)
-            x2, y2 = int(tp.get("x", 0) * rx), int(tp.get("y", 0) * ry)
+            if e["type"] == "rope":
+                tp = e.get("top", {}); bp = e.get("bottom", {})
+                x1, y1 = int(bp.get("x", 0) * rx), int(bp.get("y", 0) * ry)
+                x2, y2 = int(tp.get("x", 0) * rx), int(tp.get("y", 0) * ry)
+            else:
+                fp, tp = e.get("from_pt", {}), e.get("to_pt", {})
+                x1, y1 = int(fp.get("x", 0) * rx), int(fp.get("y", 0) * ry)
+                x2, y2 = int(tp.get("x", 0) * rx), int(tp.get("y", 0) * ry)
             is_sel = (i == si)
             c = HI_COLOR if is_sel else EDGE_COLORS.get(e["type"], (200, 200, 200))
             w = 4 if is_sel else 2

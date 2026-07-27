@@ -22,5 +22,11 @@
   ],
   "patrol_mode": "fixed_route",
   "route_name": "默认巡逻路线",
-  "min_monsters": 3
+  "min_monsters": 3,
+  "occupation": "弓箭手",
+  "single_skill": "二连射",
+  "aoe_skill": "爆炸箭",
+  "single_skill_key": "Ctrl",
+  "aoe_skill_key": "Shift",
+  "skill_rule": "mixed"
 }
