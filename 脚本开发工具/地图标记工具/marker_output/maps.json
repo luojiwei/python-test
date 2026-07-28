@@ -4739,7 +4739,7 @@
       },
       {
         "left_endpoint": {
-          "x": 7,
+          "x": 3,
           "y": 26
         },
         "right_endpoint": {
@@ -4751,7 +4751,7 @@
         "avg_y": 26,
         "turning_points": [
           {
-            "x": 7,
+            "x": 3,
             "y": 26,
             "type": "valley"
           },
@@ -4763,7 +4763,7 @@
         ],
         "all_points": [
           [
-            7,
+            3,
             26
           ],
           [

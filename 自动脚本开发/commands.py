@@ -116,10 +116,6 @@ class ClimbCommand(Command):
         self._mount_time: float = 0.0
         self._finish_time: float = 0.0
         self._finished: bool = False
-        # 绳梯卡住检测
-        self._stuck_start_x: float = 0.0       # 进入 climb 时的 x 坐标
-        self._stuck_recovering: bool = False     # 是否正在恢复
-        self._stuck_recovery_start: float = 0.0  # 恢复开始时间
         self._log(f"[爬梯] 创建: dir={direction} rope_x={rope_x:.0f} target_y={target_y:.0f} dep_y={departure_y:.0f}")
 
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
@@ -186,42 +182,6 @@ class ClimbCommand(Command):
                     self._cstate = "climb"; actions.climb_down()
 
         elif self._cstate == "climb":
-            # === 绳梯卡住检测 ===
-            if self._stuck_start_x == 0.0:
-                self._stuck_start_x = px  # 记录进入 climb 时的 x
-
-            if self._stuck_recovering:
-                # 恢复模式：持续按爬梯方向
-                if going_up:
-                    actions.climb_up()
-                else:
-                    actions.climb_down()
-                if now - self._stuck_recovery_start > 0.5:
-                    self._stuck_recovering = False
-                    self._stuck_start_x = px  # 重置检测起点
-                    self._log(f"[爬梯] 卡住恢复完成 x={px:.0f}")
-                return  # 恢复期间不走正常逻辑
-
-            # 正常检测：检查最近 10 帧坐标是否变化
-            history = state.pos_history
-            if len(history) >= 10:
-                recent = history[-10:]
-                all_same = all((x == px and y == py) for x, y in recent)
-                if all_same and abs(px - self._stuck_start_x) < 2:
-                    # 卡住了！进入恢复模式
-                    self._stuck_recovering = True
-                    self._stuck_recovery_start = now
-                    self._log(f"[爬梯] 检测到绳梯卡死! x={px:.0f} y={py:.0f} — 恢复0.5s")
-                    if going_up:
-                        actions.climb_up()
-                    else:
-                        actions.climb_down()
-                    return
-            elif abs(px - self._stuck_start_x) >= 2:
-                # x 有显著位移 → 重置检测起点
-                self._stuck_start_x = px
-
-            # 正常爬梯逻辑
             if going_up:
                 actions.climb_up()
                 if py <= self._target_y:
@@ -232,9 +192,8 @@ class ClimbCommand(Command):
                         self._cstate = "finish"; self._finish_time = now
                         self._log(f"[爬梯] climb→finish")
                         actions.release_all()
-                elif self._reached_top_time == 0.0:
-                    self._reached_top_time = 0.0  # 正常爬梯中，无变化
-                # 已开始 overshoot 计时 → 不重置（py 短暂弹动是正常的）
+                elif self._reached_top_time > 0:
+                    self._reached_top_time = 0.0  # py 弹回，重置 overshoot
             else:
                 actions.climb_down()
                 if py >= self._target_y - 3:
@@ -257,14 +216,20 @@ class ClimbCommand(Command):
 
     def is_on_rope(self, py: float) -> bool:
         """判断角色是否还在绳梯范围内"""
-        
-        # overshoot 期间角色有意爬过绳梯顶端，仍视为"在绳梯上"
         if self._cstate == "climb" and self._reached_top_time > 0:
-            return True
+            return True  # overshoot 期间仍视为在绳梯上
         if self._direction == "up":
             return self._target_y < py < self._departure_y
         else:
             return self._departure_y < py < self._target_y
+
+    def is_in_climb_state(self) -> bool:
+        """是否已进入 climb 阶段（用于绳梯卡住监控器激活判断）"""
+        return self._cstate == "climb"
+
+    def get_rope_info(self) -> tuple[float, str]:
+        """返回 (rope_x, direction)，供监控器使用"""
+        return self._rope_x, self._direction
 
 
 # ============================================================
@@ -362,6 +327,81 @@ class JumpDownCommand(Command):
 class IdleCommand(Command):
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
         actions.release_all()
+
+
+# ============================================================
+# 绳梯卡住监控器（独立于 ClimbCommand 生命周期）
+# ============================================================
+
+class RopeStuckMonitor:
+    """绳梯卡住检测器，ClimbCommand 进入 climb 时激活，x 脱离绳梯时停用。
+
+    只要角色的 x 坐标还在绳梯上，就持续监控位置历史，检测卡住并自动恢复。
+    """
+
+    ROPE_X_TOLERANCE: float = 1.0   # x 在此范围内视为"在绳梯上"
+    STUCK_FRAMES: int = 10          # 连续不动帧数判定卡住
+    RECOVERY_DURATION: float = 0.5  # 恢复模式持续时间
+
+    def __init__(self, log_cb=None) -> None:
+        self._log = log_cb or (lambda s: None)
+        self._rope_x: float = 0.0
+        self._rope_dir: str = "up"     # up / down
+        self._active: bool = False
+        self._recovering: bool = False
+        self._recovery_start: float = 0.0
+
+    def activate(self, rope_x: float, direction: str) -> None:
+        """ClimbCommand 进入 climb 时调用，启动监控。"""
+        self._rope_x = rope_x
+        self._rope_dir = direction
+        self._active = True
+        self._recovering = False
+        self._log(f"[绳梯监控] 已激活 rope_x={rope_x:.0f} dir={direction}")
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def tick(self, actions: KeyActionManager, state: GameState) -> None:
+        """每帧调用，检查是否需要恢复操作。"""
+        if not self._active:
+            return
+
+        px = state.player_minimap_x
+        now: float = time.time()
+
+        # 停止条件：x 已脱离绳梯
+        if abs(px - self._rope_x) > self.ROPE_X_TOLERANCE:
+            self._active = False
+            if self._recovering:
+                key = 'u' if self._rope_dir == 'up' else 'd'
+                actions.release_extra(key)
+                self._recovering = False
+            self._log(f"[绳梯监控] x 脱离绳梯 (|{px:.0f}-{self._rope_x:.0f}|>1) → 停止监控")
+            return
+
+        # 恢复模式：持续追加按爬梯方向（不干扰其他命令的按键）
+        if self._recovering:
+            key = 'u' if self._rope_dir == 'up' else 'd'
+            actions.hold_extra(key)
+            if now - self._recovery_start > self.RECOVERY_DURATION:
+                actions.release_extra(key)
+                self._recovering = False
+                self._log("[绳梯监控] 恢复完成")
+            return
+
+        # 卡住检测：10 帧位置不变
+        history = state.pos_history
+        if len(history) >= self.STUCK_FRAMES:
+            recent = history[-self.STUCK_FRAMES:]
+            py = state.player_minimap_y
+            all_same = all(x == px and y == py for x, y in recent)
+            if all_same:
+                self._recovering = True
+                self._recovery_start = now
+                key = 'u' if self._rope_dir == 'up' else 'd'
+                actions.hold_extra(key)
+                self._log(f"[绳梯监控] 检测到卡死! x={px:.0f} y={py:.0f} — 恢复0.5s")
 
 
 # ============================================================

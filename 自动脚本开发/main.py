@@ -38,7 +38,7 @@ from perception import (
     GameState, Calibrator,
 )
 from world_model import WorldModel
-from commands import Command, ClimbCommand, decide, TimedAttackCommand, TurnAndAttackCommand
+from commands import Command, ClimbCommand, decide, TimedAttackCommand, TurnAndAttackCommand, RopeStuckMonitor
 from key_actions import KeyActionManager
 from map_loader import MapLoader
 from perception_pipeline import PerceptionPipeline
@@ -86,6 +86,7 @@ class AutoFarmV2App:
         self._transition_in_progress: bool = False
         self._transition_start_time: float = 0.0
         self._current_command: Command | None = None
+        self._rope_monitor: RopeStuckMonitor = RopeStuckMonitor(log_cb=self._log_error)
         self._last_logic: float = 0.0
         self._last_perception: float = 0.0
         self._facing_stuck_since: float = 0.0      # 同朝向持续时间
@@ -588,13 +589,32 @@ class AutoFarmV2App:
     _debug_frame_seq: int = 0
 
     def _save_debug_frame(self, frame: np.ndarray) -> None:
-        """保存游戏窗口截图到 debug_frames 目录，循环覆盖最近 20 帧。"""
+        """保存游戏窗口截图到 debug_frames 目录，标注角色/怪物信息，循环覆盖最近 50 帧。"""
         import cv2
+        import config as cfg
         out_dir = Path(__file__).parent / "debug_frames"
         out_dir.mkdir(exist_ok=True)
-        self._debug_frame_seq = (self._debug_frame_seq + 1) % 20
+        self._debug_frame_seq = (self._debug_frame_seq + 1) % 50
         fname = out_dir / f"frame_{self._debug_frame_seq:02d}.png"
-        cv2.imwrite(str(fname), frame)
+
+        # 标注角色位置
+        annotated = frame.copy()
+        px, py = int(self.state.player_screen_x), int(self.state.player_screen_y)
+        mmx, mmy = int(self.state.player_minimap_x), int(self.state.player_minimap_y)
+        cv2.circle(annotated, (px, py), 8, (0, 255, 255), 2)  # 黄色圆
+        cv2.putText(annotated, f"P({px},{py}) MM({mmx},{mmy})",
+                    (px + 12, py - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+
+        # 标注怪物
+        for m in self.state.monsters:
+            mx, my = int(m["cx"]), int(m["y2"])
+            cls_id = m.get("cls", -1)
+            name = cfg.CLASS_NAMES.get(cls_id, f"c{cls_id}")
+            cv2.circle(annotated, (mx, my), 6, (0, 0, 255), 2)  # 红色圆
+            cv2.putText(annotated, f"{name}({mx},{my})",
+                        (mx + 8, my - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+
+        cv2.imwrite(str(fname), annotated)
 
     # --- 主循环 ---
 
@@ -680,6 +700,15 @@ class AutoFarmV2App:
                 # ---- 执行 (每 tick) ----
                 if self.running and self._current_command and wm:
                     self._current_command.execute_tick(self.actions, self.state, wm)
+
+                # ---- 绳梯卡住监控（独立于 ClimbCommand 生命周期） ----
+                if self.running:
+                    cmd = self._current_command
+                    if isinstance(cmd, ClimbCommand) and cmd.is_in_climb_state() \
+                            and not self._rope_monitor.is_active():
+                        rope_x, direction = cmd.get_rope_info()
+                        self._rope_monitor.activate(rope_x, direction)
+                    self._rope_monitor.tick(self.actions, self.state)
 
                 # ---- 调试截图 (每 tick) ----
                 if self._debug_enabled and frame is not None:

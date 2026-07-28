@@ -59,6 +59,10 @@ class KeySender:
         for k in keys:
             self.press(k)
 
+    def press_extra(self, key: str) -> None:
+        """仅按下指定键，不释放其他已按住键。"""
+        self.press(key)
+
     def force_release_all(self) -> None:
         for k in KEY_MAP:
             vk, sc = KEY_MAP[k]

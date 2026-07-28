@@ -36,6 +36,17 @@ class DecisionStrategy(ABC):
         self._get_skill = get_skill_cb or (lambda mc: {"name": None, "key": "a", "range": ATTACK_DISTANCE, "fullscreen": False})
         self._log = log_cb or (lambda msg: None)
 
+    def _monster_name(self, cls_id: int) -> str:
+        """根据 YOLO class_id 获取怪物中文名。"""
+        return config.CLASS_NAMES.get(cls_id, f"cls_{cls_id}")
+
+    @staticmethod
+    def _format_monsters(monsters: list[dict], px: float, py: float) -> str:
+        """格式化怪物列表为日志字符串：'#只: [名称(sx,sy) ...]'"""
+        items = [f"{config.CLASS_NAMES.get(m.get('cls', -1), '?')}"
+                 f"({m['cx']:.0f},{m['y2']:.0f})" for m in monsters]
+        return f"{len(monsters)}只: [{', '.join(items)}]"
+
     @abstractmethod
     def decide(self, state: GameState, wm: WorldModel,
                patrol_direction: str,
@@ -347,7 +358,8 @@ class FixedRouteStrategy(DecisionStrategy):
                 if (m["cx"] - cx >= 0) == (facing == 'r')]
             if front:
                 m = front[0]
-                log_lines.append(f"动作: 身前有怪（dx={m['cx'] - cx:.0f}），用{skill.get('name', '攻击')}攻击")
+                info = self._format_monsters(front, cx, cy)
+                log_lines.append(f"动作: 身前{info}，用{skill.get('name', '攻击')}攻击")
                 return TimedAttackCommand(skill_key), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
 
             # 身前没有，身后有 → 转身攻击
@@ -355,8 +367,9 @@ class FixedRouteStrategy(DecisionStrategy):
                 if (m["cx"] - cx >= 0) != (facing == 'r')]
             if behind:
                 m = behind[0]
+                info = self._format_monsters(behind, cx, cy)
                 new_dir = 'r' if m["cx"] - cx > 0 else 'l'
-                log_lines.append(f"动作: 身后有怪（dx={m['cx'] - cx:.0f}），转身攻击")
+                log_lines.append(f"动作: 身后{info}，转身攻击")
                 return TurnAndAttackCommand(new_dir, skill_key), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
 
         # 跨平台移动

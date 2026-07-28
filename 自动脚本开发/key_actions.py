@@ -77,6 +77,14 @@ class KeyActionManager:
         """保持指定键组合，释放其他（不自动更新朝向）。"""
         self.keys.hold_only(key_tuple)
 
+    def hold_extra(self, key: str) -> None:
+        """追加按住指定键，不释放其他已按住键。"""
+        self.keys.press_extra(key)
+
+    def release_extra(self, key: str) -> None:
+        """释放指定键，不影响其他键。"""
+        self.keys.release(key)
+
     # ---- 移动与朝向 ----
 
     def move(self, direction: str) -> None:
