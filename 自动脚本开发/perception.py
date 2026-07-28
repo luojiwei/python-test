@@ -107,6 +107,13 @@ class GameState:
     timestamp: float = 0.0
     on_rope: bool = False           # 当前是否在绳梯上
     rope_frames: int = 0            # 连续在绳梯上的帧数
+    pos_history: list[tuple[float, float]] = field(default_factory=list)  # 最近N帧小地图坐标
+
+    def record_position(self, x: float, y: float, max_frames: int = 50) -> None:
+        """记录当前小地图坐标，保留最近 max_frames 帧。"""
+        self.pos_history.append((x, y))
+        if len(self.pos_history) > max_frames:
+            self.pos_history.pop(0)
 
 
 # ============================================================

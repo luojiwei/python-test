@@ -626,14 +626,17 @@ class AutoFarmV2App:
                 # ---- 感知 ----
                 if now - self._last_perception >= PERCEPTION_INTERVAL:
                     self.perception.perceive(frame, self.state, target_hwnd, self.frame_count)
+                    self.state.record_position(
+                        self.state.player_minimap_x, self.state.player_minimap_y)
                     self._last_perception = now
 
                 # ---- 技能计时器 ----
-                self.skills.process(now)
+                if self.running:
+                    self.skills.process(now)
 
                 # ---- 决策 ----
                 logic_interval = 0.3 if self.patrol_mode_var.get() == "fixed_route" else LOGIC_INTERVAL
-                if now - self._last_logic >= logic_interval and wm:
+                if self.running and now - self._last_logic >= logic_interval and wm:
                     if self.transition.in_progress:
                         tr = self.transition.check(
                             self._current_command, self.state.player_minimap_y, now)
@@ -675,7 +678,7 @@ class AutoFarmV2App:
                     #     self._log_error(f"朝向僵死检测: 5s同朝向({facing_now})怪物未减({mc_now}只)")
 
                 # ---- 执行 (每 tick) ----
-                if self._current_command and wm:
+                if self.running and self._current_command and wm:
                     self._current_command.execute_tick(self.actions, self.state, wm)
 
                 # ---- 调试截图 (每 tick) ----

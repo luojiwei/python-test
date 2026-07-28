@@ -116,6 +116,10 @@ class ClimbCommand(Command):
         self._mount_time: float = 0.0
         self._finish_time: float = 0.0
         self._finished: bool = False
+        # 绳梯卡住检测
+        self._stuck_start_x: float = 0.0       # 进入 climb 时的 x 坐标
+        self._stuck_recovering: bool = False     # 是否正在恢复
+        self._stuck_recovery_start: float = 0.0  # 恢复开始时间
         self._log(f"[爬梯] 创建: dir={direction} rope_x={rope_x:.0f} target_y={target_y:.0f} dep_y={departure_y:.0f}")
 
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
@@ -182,6 +186,42 @@ class ClimbCommand(Command):
                     self._cstate = "climb"; actions.climb_down()
 
         elif self._cstate == "climb":
+            # === 绳梯卡住检测 ===
+            if self._stuck_start_x == 0.0:
+                self._stuck_start_x = px  # 记录进入 climb 时的 x
+
+            if self._stuck_recovering:
+                # 恢复模式：持续按爬梯方向
+                if going_up:
+                    actions.climb_up()
+                else:
+                    actions.climb_down()
+                if now - self._stuck_recovery_start > 0.5:
+                    self._stuck_recovering = False
+                    self._stuck_start_x = px  # 重置检测起点
+                    self._log(f"[爬梯] 卡住恢复完成 x={px:.0f}")
+                return  # 恢复期间不走正常逻辑
+
+            # 正常检测：检查最近 10 帧坐标是否变化
+            history = state.pos_history
+            if len(history) >= 10:
+                recent = history[-10:]
+                all_same = all((x == px and y == py) for x, y in recent)
+                if all_same and abs(px - self._stuck_start_x) < 2:
+                    # 卡住了！进入恢复模式
+                    self._stuck_recovering = True
+                    self._stuck_recovery_start = now
+                    self._log(f"[爬梯] 检测到绳梯卡死! x={px:.0f} y={py:.0f} — 恢复0.5s")
+                    if going_up:
+                        actions.climb_up()
+                    else:
+                        actions.climb_down()
+                    return
+            elif abs(px - self._stuck_start_x) >= 2:
+                # x 有显著位移 → 重置检测起点
+                self._stuck_start_x = px
+
+            # 正常爬梯逻辑
             if going_up:
                 actions.climb_up()
                 if py <= self._target_y:
