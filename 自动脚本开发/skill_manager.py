@@ -167,25 +167,14 @@ class SkillManager:
         self._configs = configs
         return configs
 
-    def save_cache(self, map_name: str, patrol_mode: str,
-                   route_name: str, min_monsters: int,
-                   occupation: str = "", single_skill: str = "",
-                   aoe_skill: str = "", skill_rule: str = "mixed",
-                   single_skill_key: str = "", aoe_skill_key: str = "") -> None:
-        """保存 Buff 配置 + 决策配置 + 职业配置 + 地图到缓存文件。"""
-        cache_data = {
-            "map": map_name,
-            "skills": [],
-            "patrol_mode": patrol_mode,
-            "route_name": route_name,
-            "min_monsters": min_monsters,
-            "occupation": occupation,
-            "single_skill": single_skill,
-            "aoe_skill": aoe_skill,
-            "single_skill_key": single_skill_key,
-            "aoe_skill_key": aoe_skill_key,
-            "skill_rule": skill_rule,
-        }
+    def save_cache(self, decision_config: dict | None = None) -> None:
+        """保存 Buff 配置到 skill_config.json。
+
+        决策/职业/地图等配置已统一归入 main.py 的 _save_config() trace 机制，
+        此方法只保存 Buff 技能列表。如有额外配置需要一并存储，可传入 decision_config dict。
+        """
+        cache_data = decision_config or {}
+        cache_data["skills"] = []
         for row in self._rows:
             cache_data["skills"].append({
                 "name": row["name_var"].get(),

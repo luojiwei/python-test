@@ -1,4 +1,8 @@
-"""commands.py — 命令系统 + 决策引擎"""
+"""commands.py — 命令系统（命令类定义）
+
+决策引擎已迁移到 decision_strategies.py，绳梯卡死监控已迁移到 transition.py。
+本文件只保留命令类定义。
+"""
 
 import time
 
@@ -9,8 +13,6 @@ from config import (
     ATTACK_DISTANCE, ATTACK_VERTICAL, ATTACK_PULSE,
     PLATFORM_TOLERANCE, JUMP_THRESHOLD,
 )
-from edge_types import TYPE_CN
-from input_utils import KeySender
 from key_actions import KeyActionManager
 from perception import GameState
 from world_model import WorldModel
@@ -227,6 +229,10 @@ class ClimbCommand(Command):
         """是否已进入 climb 阶段（用于绳梯卡住监控器激活判断）"""
         return self._cstate == "climb"
 
+    def is_in_turn_or_move_stage(self) -> bool:
+        """是否处于 turn 或 move 阶段（用于 TransitionController 判断是否中断爬梯移动）"""
+        return self._cstate in ("turn", "move")
+
     def get_rope_info(self) -> tuple[float, str]:
         """返回 (rope_x, direction)，供监控器使用"""
         return self._rope_x, self._direction
@@ -237,6 +243,12 @@ class ClimbCommand(Command):
 # ============================================================
 
 class JumpCommand(Command):
+    """跳跃命令：走到目标x后跳跃，使用阶段计时器替代阻塞sleep。
+
+    阶段: move → jump(空中滞留) → land → finish
+    """
+    JUMP_AIR_DURATION: float = 0.2  # 跳跃滞空时间
+
     def __init__(self, target_x: float, target_y: float,
                  timeout: float = JUMP_TIMEOUT, target_platform: str = ""):
         self._target_x = target_x
@@ -245,23 +257,36 @@ class JumpCommand(Command):
         self._timeout = timeout
         self._start_time = time.time()
         self._stage: str = "move"
+        self._jump_time: float = 0.0  # 跳跃开始时间
 
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
         now = time.time()
         if now - self._start_time > self._timeout:
             actions.release_all(); return
+
         if self._stage == "move":
             dx = self._target_x - state.player_minimap_x
             if abs(dx) <= 3:
-                self._stage = "jump"; self._start_time = now
+                self._stage = "jump"
+                self._jump_time = now
                 d = 'r' if dx > 0 else 'l'
-                actions.jump(d); time.sleep(0.2); actions.release_all()
+                actions.jump(d)
             else:
                 d = 'r' if dx > 0 else 'l'
                 actions.move(d)
 
+        elif self._stage == "jump":
+            # 滞空阶段：等待 JUMP_AIR_DURATION 后释放按键
+            if now - self._jump_time >= self.JUMP_AIR_DURATION:
+                actions.release_all()
+                self._stage = "land"
+
+        elif self._stage == "land":
+            # 着陆后标记完成（is_finished 通过超时判断）
+            self._stage = "finish"
+
     def is_finished(self) -> bool:
-        return time.time() - self._start_time > self._timeout
+        return self._stage == "finish" or time.time() - self._start_time > self._timeout
 
     def is_transition(self) -> bool:
         return True
@@ -329,113 +354,5 @@ class IdleCommand(Command):
         actions.release_all()
 
 
-# ============================================================
-# 绳梯卡住监控器（独立于 ClimbCommand 生命周期）
-# ============================================================
-
-class RopeStuckMonitor:
-    """绳梯卡住检测器，ClimbCommand 进入 climb 时激活，x 脱离绳梯时停用。
-
-    只要角色的 x 坐标还在绳梯上，就持续监控位置历史，检测卡住并自动恢复。
-    """
-
-    ROPE_X_TOLERANCE: float = 1.0   # x 在此范围内视为"在绳梯上"
-    STUCK_FRAMES: int = 10          # 连续不动帧数判定卡住
-    RECOVERY_DURATION: float = 0.5  # 恢复模式持续时间
-
-    def __init__(self, log_cb=None) -> None:
-        self._log = log_cb or (lambda s: None)
-        self._rope_x: float = 0.0
-        self._rope_dir: str = "up"     # up / down
-        self._active: bool = False
-        self._recovering: bool = False
-        self._recovery_start: float = 0.0
-
-    def activate(self, rope_x: float, direction: str) -> None:
-        """ClimbCommand 进入 climb 时调用，启动监控。"""
-        self._rope_x = rope_x
-        self._rope_dir = direction
-        self._active = True
-        self._recovering = False
-        self._log(f"[绳梯监控] 已激活 rope_x={rope_x:.0f} dir={direction}")
-
-    def is_active(self) -> bool:
-        return self._active
-
-    def tick(self, actions: KeyActionManager, state: GameState) -> None:
-        """每帧调用，检查是否需要恢复操作。"""
-        if not self._active:
-            return
-
-        px = state.player_minimap_x
-        now: float = time.time()
-
-        # 停止条件：x 已脱离绳梯
-        if abs(px - self._rope_x) > self.ROPE_X_TOLERANCE:
-            self._active = False
-            if self._recovering:
-                key = 'u' if self._rope_dir == 'up' else 'd'
-                actions.release_extra(key)
-                self._recovering = False
-            self._log(f"[绳梯监控] x 脱离绳梯 (|{px:.0f}-{self._rope_x:.0f}|>1) → 停止监控")
-            return
-
-        # 恢复模式：持续追加按爬梯方向（不干扰其他命令的按键）
-        if self._recovering:
-            key = 'u' if self._rope_dir == 'up' else 'd'
-            actions.hold_extra(key)
-            if now - self._recovery_start > self.RECOVERY_DURATION:
-                actions.release_extra(key)
-                self._recovering = False
-                self._log("[绳梯监控] 恢复完成")
-            return
-
-        # 卡住检测：10 帧位置不变
-        history = state.pos_history
-        if len(history) >= self.STUCK_FRAMES:
-            recent = history[-self.STUCK_FRAMES:]
-            py = state.player_minimap_y
-            all_same = all(x == px and y == py for x, y in recent)
-            if all_same:
-                self._recovering = True
-                self._recovery_start = now
-                key = 'u' if self._rope_dir == 'up' else 'd'
-                actions.hold_extra(key)
-                self._log(f"[绳梯监控] 检测到卡死! x={px:.0f} y={py:.0f} — 恢复0.5s")
 
 
-# ============================================================
-# 决策引擎
-# ============================================================
-
-# TYPE_CN 已移至 edge_types.py，此处保留引用以兼容旧代码
-TYPE_CN = TYPE_CN
-
-
-def nearest_monster(cx: float, cy: float, monsters: list[dict]) -> dict | None:
-    on_platform = [m for m in monsters
-                   if abs(m["y2"] - cy) <= PLATFORM_TOLERANCE]
-    if not on_platform:
-        return None
-    return min(on_platform, key=lambda m: abs(m["cx"] - cx))
-
-
-def decide(state: GameState, wm: WorldModel,
-           patrol_direction: str,
-           transition_in_progress: bool,
-           min_monsters_on_platform: int = 3,
-           patrol_mode: str = "auto_hunt",
-           patrol_waypoints: list | None = None,
-           current_waypoint_idx: int = 0,
-           return_method: str = "一直走",
-           get_skill_cb=None, log_cb=None) -> tuple[Command, str, int, str]:
-    """决策调度器。get_skill_cb(monster_count) -> {"name","key","range","fullscreen"}"""
-    from decision_strategies import STRATEGIES, create_strategies
-    strategies = create_strategies(get_skill_cb, log_cb=log_cb) if get_skill_cb or log_cb else STRATEGIES
-    strategy = strategies.get(patrol_mode, strategies.get("auto_hunt"))
-    if strategy is None:
-        return IdleCommand(), patrol_direction, current_waypoint_idx, "无匹配策略"
-    return strategy.decide(
-        state, wm, patrol_direction, transition_in_progress,
-        min_monsters_on_platform, patrol_waypoints, current_waypoint_idx,
-        return_method)

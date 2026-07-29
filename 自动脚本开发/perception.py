@@ -104,10 +104,10 @@ class GameState:
     current_platform: str | None = None
     monsters: list[dict] = field(default_factory=list)
     facing: str = "r"
-    timestamp: float = 0.0
     on_rope: bool = False           # 当前是否在绳梯上
     rope_frames: int = 0            # 连续在绳梯上的帧数
     pos_history: list[tuple[float, float]] = field(default_factory=list)  # 最近N帧小地图坐标
+    last_perception_time: float = 0.0  # 最近一次成功感知的时间戳
 
     def record_position(self, x: float, y: float, max_frames: int = 50) -> None:
         """记录当前小地图坐标，保留最近 max_frames 帧。"""

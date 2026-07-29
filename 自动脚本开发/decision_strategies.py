@@ -6,6 +6,7 @@
 - FixedRouteStrategy: 固定路线（按途经点行进）
 """
 
+import time
 from abc import ABC, abstractmethod
 
 import config
@@ -18,8 +19,21 @@ from world_model import WorldModel
 from commands import (
     AttackCommand, ClimbCommand, Command, FlashCommand, HoldDirCommand,
     IdleCommand, JumpCommand, JumpDownCommand, MoveToCommand, TimedAttackCommand,
-    TurnAndAttackCommand, nearest_monster,
+    TurnAndAttackCommand,
 )
+
+
+# ============================================================
+# 辅助函数（原 commands.py 中迁移至此）
+# ============================================================
+
+def nearest_monster(cx: float, cy: float, monsters: list[dict]) -> dict | None:
+    """在怪物列表中找到同平台最近的怪物。"""
+    on_platform = [m for m in monsters
+                   if abs(m["y2"] - cy) <= PLATFORM_TOLERANCE]
+    if not on_platform:
+        return None
+    return min(on_platform, key=lambda m: abs(m["cx"] - cx))
 
 
 # ============================================================
@@ -28,6 +42,9 @@ from commands import (
 
 class DecisionStrategy(ABC):
     """决策策略基类。"""
+
+    # 感知数据过期阈值：超过此时间视为"感知过期"，降级为 IdleCommand
+    PERCEPTION_STALE_THRESHOLD: float = 2.0  # 秒
 
     def __init__(self, mode_name: str, mode_cn: str,
                  get_skill_cb=None, log_cb=None) -> None:
@@ -39,6 +56,26 @@ class DecisionStrategy(ABC):
     def _monster_name(self, cls_id: int) -> str:
         """根据 YOLO class_id 获取怪物中文名。"""
         return config.CLASS_NAMES.get(cls_id, f"cls_{cls_id}")
+
+    @staticmethod
+    def _check_perception_freshness(self, state: GameState, log_lines: list[str]) -> bool:
+        """检查感知数据是否新鲜。
+
+        如果 last_perception_time 超过阈值，说明感知数据过期，
+        决策应降级为 IdleCommand 避免基于旧数据做出错误决策。
+
+        Returns:
+            True = 感知新鲜，可继续决策
+            False = 感知过期，应降级为 IdleCommand
+        """
+        if state.last_perception_time <= 0:
+            # 首帧还没感知过，允许继续
+            return True
+        age = time.time() - state.last_perception_time
+        if age > self.PERCEPTION_STALE_THRESHOLD:
+            log_lines.append(f"⚠ 感知过期 ({age:.1f}s > {self.PERCEPTION_STALE_THRESHOLD}s)，降级待机")
+            return False
+        return True
 
     @staticmethod
     def _format_monsters(monsters: list[dict], px: float, py: float) -> str:
@@ -194,6 +231,10 @@ class AutoHuntStrategy(DecisionStrategy):
         cx, cy, log_lines, current_platform, facing = self._init_log(state, wm)
         monsters = state.monsters
 
+        # 感知新鲜度检查
+        if not self._check_perception_freshness(state, log_lines):
+            return IdleCommand(), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
+
         if transition_in_progress:
             log_lines.append("动作: 平台移动中，等待完成...")
             return IdleCommand(), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
@@ -319,6 +360,10 @@ class FixedRouteStrategy(DecisionStrategy):
 
         if not patrol_waypoints or len(patrol_waypoints) < 2:
             log_lines.append("动作: 无有效巡逻路线，待机")
+            return IdleCommand(), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
+
+        # 感知新鲜度检查
+        if not self._check_perception_freshness(state, log_lines):
             return IdleCommand(), patrol_direction, current_waypoint_idx, "\n".join(log_lines)
 
         # 绳梯上 → 沿绳梯继续爬

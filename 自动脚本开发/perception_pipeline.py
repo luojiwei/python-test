@@ -37,6 +37,8 @@ class PerceptionPipeline:
         self._last_yolo: float = 0.0
         self._monsters: list[dict] = []
         self._char_lost_frames: int = 0
+        self._calib_predict_frames: int = 0   # 连续使用校准器推算的帧数
+        MAX_CALIB_PREDICT_FRAMES: int = 30    # 连续推算30帧后强制放弃
 
     def perceive(self, frame: np.ndarray, state: GameState,
                  target_hwnd: int, frame_count: int) -> None:
@@ -57,6 +59,13 @@ class PerceptionPipeline:
             if self._char_lost_frames >= 5:
                 if state.player_minimap_x != 0:
                     self._char_lost_frames = 0
+                    self._calib_predict_frames += 1
+                    # 连续推算帧数超限 → 强制放弃，视为角色完全丢失
+                    if self._calib_predict_frames > self.MAX_CALIB_PREDICT_FRAMES:
+                        self.actions.force_release_all()
+                        self._log(f"[{frame_count:04d}] 角色丢失(校准器推算超限{self._calib_predict_frames}帧)")
+                        state.last_perception_time = now
+                        return
                     if self.calib.has_data():
                         px, py, pred_conf = self.calib.predict(
                             state.player_minimap_x, state.player_minimap_y)
@@ -72,6 +81,7 @@ class PerceptionPipeline:
             state.player_screen_x = cx
             state.player_screen_y = cy
             self._char_lost_frames = 0
+            self._calib_predict_frames = 0  # 模板匹配成功，重置推算计数
             if conf > 0.55 and state.player_minimap_x != 0:
                 self.calib.add(state.player_minimap_x, state.player_minimap_y, cx, cy)
 
@@ -94,6 +104,7 @@ class PerceptionPipeline:
                 state.player_minimap_y = dot[1]
                 pid = self.wm.find_platform(dot[0], dot[1])
                 state.current_platform = pid  # 允许为 None，防止残留旧平台
+                state.last_perception_time = now  # 黄点定位成功，记录感知时间
 
                 was_on_rope = state.on_rope
                 if detect_on_rope(self.wm, dot[0], dot[1]):
@@ -109,6 +120,10 @@ class PerceptionPipeline:
                                   f"(x={dot[0]:.0f}, y={dot[1]:.0f})")
                     else:
                         self._log(f"[{frame_count:04d}] 角色离开绳梯")
+
+        # 感知完成：如果没有黄点，也记录感知时间（说明 YOLO 和模板仍在工作）
+        if state.last_perception_time == 0 or now - state.last_perception_time > 0.05:
+            state.last_perception_time = now
 
         # ---- 4) 诊断日志（每 2 秒） ----
         if frame_count % 60 == 0:

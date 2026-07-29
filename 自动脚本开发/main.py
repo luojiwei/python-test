@@ -38,12 +38,13 @@ from perception import (
     GameState, Calibrator,
 )
 from world_model import WorldModel
-from commands import Command, ClimbCommand, decide, TimedAttackCommand, TurnAndAttackCommand, RopeStuckMonitor
+from commands import Command, ClimbCommand, TimedAttackCommand, TurnAndAttackCommand
+from decision_strategies import decide, nearest_monster
 from key_actions import KeyActionManager
 from map_loader import MapLoader
 from perception_pipeline import PerceptionPipeline
 from skill_manager import SkillManager
-from transition import TransitionController
+from transition import TransitionController, RopeStuckMonitor
 
 
 # ============================================================
@@ -425,14 +426,8 @@ class AutoFarmV2App:
         for i, cfg in enumerate(self.skills.configs):
             self._log_error(f"  #{i} 名称={cfg['name']} 键位={cfg['key']} 持续={cfg['duration']}s")
 
-        # 保存缓存
-        rule_code = SKILL_RULE_DISPLAY_TO_CODE.get(self.skill_rule_var.get(), "mixed")
-        self.skills.save_cache(
-            map_name, self.patrol_mode_var.get(),
-            self._route_dropdown_var.get(), self.min_monsters_var.get(),
-            self.occupation_var.get(), self.single_skill_var.get(),
-            self.aoe_skill_var.get(), rule_code,
-            self.single_skill_key_var.get(), self.aoe_skill_key_var.get())
+        # 保存缓存（决策配置由 _save_config() 管理，此处只存 Buff）
+        self.skills.save_cache()
 
         # 启动时释放技能
         self.skills.initial_cast()
@@ -542,6 +537,25 @@ class AutoFarmV2App:
         except Exception:
             pass  # 保存失败不阻塞正常流程
 
+    def _skip_passed_waypoints(self, wps: list[tuple[float, float]],
+                                start_idx: int, px: float) -> int:
+        """跳过已走过的途经点：路线方向上角色已越过则前进。
+
+        公共逻辑，_detect_start_waypoint() 和 _recalc_waypoint() 共用。
+        """
+        idx = start_idx
+        while idx < len(wps) - 1:
+            wx1, _ = wps[idx]
+            wx2, _ = wps[idx + 1]
+            dx_route = wx2 - wx1
+            if dx_route > 5 and px > wx1 + 5:
+                idx += 1  # 路线向右，角色在途经点右边 → 已走过
+            elif dx_route < -5 and px < wx1 - 5:
+                idx += 1  # 路线向左，角色在途经点左边 → 已走过
+            else:
+                break
+        return idx
+
     def _detect_start_waypoint(self) -> int:
         """启动时捕获一帧感知，找到角色最近的途经点索引，跳过已走过的。"""
         wps = self._patrol_waypoints
@@ -564,18 +578,7 @@ class AutoFarmV2App:
                     best_dist = dist
                     best_idx = i
 
-            # 跳过已走过的途经点：路线方向上角色已越过 nearest 则前进
-            idx = best_idx
-            while idx < len(wps) - 1:
-                wx1, _ = wps[idx]
-                wx2, _ = wps[idx + 1]
-                dx_route = wx2 - wx1
-                if dx_route > 5 and px > wx1 + 5:
-                    idx += 1  # 路线向右，角色在途经点右边 → 已走过
-                elif dx_route < -5 and px < wx1 - 5:
-                    idx += 1  # 路线向左，角色在途经点左边 → 已走过
-                else:
-                    break
+            idx = self._skip_passed_waypoints(wps, best_idx, px)
 
             if idx != best_idx:
                 self._log_error(f"[启动] 检测位置 ({px:.0f},{py:.0f})，最近 #{best_idx}，已走过 → 从 #{idx} 开始")
@@ -605,18 +608,7 @@ class AutoFarmV2App:
                     best_dist = dist
                     best_idx = i
 
-            # 和 _detect_start_waypoint 一样的走过跳过逻辑
-            idx = best_idx
-            while idx < len(wps) - 1:
-                wx1, _ = wps[idx]
-                wx2, _ = wps[idx + 1]
-                dx_route = wx2 - wx1
-                if dx_route > 5 and px > wx1 + 5:
-                    idx += 1
-                elif dx_route < -5 and px < wx1 - 5:
-                    idx += 1
-                else:
-                    break
+            idx = self._skip_passed_waypoints(wps, best_idx, px)
 
             if idx != self._current_waypoint_idx:
                 self._log_error(f"[重算] 位置 ({px:.0f},{py:.0f})，途经点 {self._current_waypoint_idx}→{idx} (最近#{best_idx})")

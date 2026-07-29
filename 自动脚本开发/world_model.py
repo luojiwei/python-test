@@ -86,8 +86,8 @@ class WorldModel:
                     if goes:
                         return new_path[0] if new_path else e
                 else:
-                    goes = (e["type"] == "rope" and e.get("direction") == "down") or \
-                           e["type"] in ("jump", "flash")
+                    goes = (e["type"] == EdgeType.ROPE and e.get("direction") == "down") or \
+                           e["type"] in (EdgeType.JUMP, EdgeType.FLASH)
                     if goes:
                         return new_path[0] if new_path else e
                 q.append((nxt, new_path))
