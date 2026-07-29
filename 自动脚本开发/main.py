@@ -586,6 +586,44 @@ class AutoFarmV2App:
             self._log_error(f"[启动] 位置检测失败，从途经点0开始: {e}")
             return 0
 
+    def _recalc_waypoint(self) -> int:
+        """过渡完成后，从当前感知位置重算最近途经点（轻量，不截帧）。"""
+        wps = self._patrol_waypoints
+        if not wps or len(wps) < 2:
+            return self._current_waypoint_idx
+        try:
+            px: float = self.state.player_minimap_x
+            py: float = self.state.player_minimap_y
+            if px == 0 and py == 0:
+                return self._current_waypoint_idx
+
+            best_idx: int = self._current_waypoint_idx
+            best_dist: float = float("inf")
+            for i, (wx, wy) in enumerate(wps):
+                dist = ((wx - px) ** 2 + (wy - py) ** 2) ** 0.5
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+
+            # 和 _detect_start_waypoint 一样的走过跳过逻辑
+            idx = best_idx
+            while idx < len(wps) - 1:
+                wx1, _ = wps[idx]
+                wx2, _ = wps[idx + 1]
+                dx_route = wx2 - wx1
+                if dx_route > 5 and px > wx1 + 5:
+                    idx += 1
+                elif dx_route < -5 and px < wx1 - 5:
+                    idx += 1
+                else:
+                    break
+
+            if idx != self._current_waypoint_idx:
+                self._log_error(f"[重算] 位置 ({px:.0f},{py:.0f})，途经点 {self._current_waypoint_idx}→{idx} (最近#{best_idx})")
+            return idx
+        except Exception:
+            return self._current_waypoint_idx
+
     _debug_frame_seq: int = 0
 
     def _save_debug_frame(self, frame: np.ndarray) -> None:
@@ -663,6 +701,7 @@ class AutoFarmV2App:
                         if tr.action in ("complete", "interrupt"):
                             self._current_command = None
                             self._log_error(tr.log_message)
+                            self._current_waypoint_idx = self._recalc_waypoint()
                     else:
                         cmd, self._patrol_direction, self._current_waypoint_idx, log_text = decide(
                             self.state, wm, self._patrol_direction,

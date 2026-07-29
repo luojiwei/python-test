@@ -138,10 +138,10 @@ class KeyActionManager:
     # ---- 技能 ----
 
     def cast_skill(self, key: str) -> None:
-        """释放技能：先停所有按键等待游戏响应，再轻触技能键。"""
-        self.keys.release_all()
-        time.sleep(SKILL_PRE_DELAY)
-        self.keys.tap(key, duration=SKILL_TAP_MS)
+        """释放技能：不干扰其他按键，追加按下技能键后定时释放。"""
+        self.keys.press_extra(key)
+        import threading
+        threading.Timer(SKILL_TAP_MS, lambda: self.keys.release(key)).start()
         self._throttled_log(f"释放技能 [{key}]")
 
     # ---- 僵死恢复 ----

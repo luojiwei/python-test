@@ -4,7 +4,6 @@
 消除 commands.py decide() 和 main.py _loop() 之间的状态理解分裂。
 """
 
-import random
 from dataclasses import dataclass
 
 
@@ -19,9 +18,9 @@ class TransitionController:
     """跨平台过渡状态机。
 
     核心逻辑：
-    - finished: 命令执行完毕 → 重置朝向，重新决策
+    - finished: 命令执行完毕 → 重新决策
     - off_rope: 爬梯中离开绳梯范围（可能被吹飞/误触） → 同上
-    - near_monster_on_rope: 爬梯中有近身怪 → 中断爬梯优先清怪
+    - near_monster_in_move: 走向绳梯时有近身怪 → 中断，优先清怪
     """
 
     def __init__(self, actions,  # KeyActionManager
@@ -66,14 +65,12 @@ class TransitionController:
 
         if finished or off_rope:
             self.in_progress = False
-            if self._nearby_monster():
-                self.actions.turn(random.choice(('l', 'r')))
-                return TransitionResult(action="complete", log_message="到达目标平台，附近有怪，重置朝向")
-            return TransitionResult(action="complete", log_message="到达目标平台，附近无怪，无需重置朝向")
+            return TransitionResult(action="complete", log_message="到达目标平台，无需重置朝向")
 
-        if is_climb and not command.is_on_rope(player_y) and self._nearby_monster():
+        # turn / move 阶段检测怪物 → 中断，优先清怪
+        if is_climb and command._cstate in ("turn", "move") and self._nearby_monster():
             self.in_progress = False
-            self._log("发现近身怪物，中断上梯优先清怪")
-            return TransitionResult(action="interrupt", log_message="近身怪物，中断爬梯")
+            self._log("走向绳梯时发现近身怪物，中断移动优先清怪")
+            return TransitionResult(action="interrupt", log_message="近身怪物，中断爬梯移动")
 
         return TransitionResult(action="continue")

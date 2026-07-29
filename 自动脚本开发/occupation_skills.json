@@ -21,7 +21,7 @@
   },
   "弓箭手": {
     "single_skills": [
-      {"name": "二连射", "range": 120}
+      {"name": "二连射", "range": 150}
     ],
     "aoe_skills": [
       {"name": "爆炸箭", "range": 150}

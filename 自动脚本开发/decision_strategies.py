@@ -341,8 +341,10 @@ class FixedRouteStrategy(DecisionStrategy):
                          f"回归={return_method}")
 
         # === 优先清怪（身前身后都算）===
+        # 数攻击范围内的怪物来决定用单攻还是群攻
         skill = self._get_skill(len([m for m in monsters
-                                    if abs(m["y2"] - cy) <= PLATFORM_TOLERANCE]))
+            if abs(m["y2"] - cy) <= ATTACK_VERTICAL
+            and abs(m["cx"] - cx) < ATTACK_DISTANCE]))
         skill_key = skill.get("key", "a")
         attack_range = float("inf") if skill.get("fullscreen") else skill.get("range", ATTACK_DISTANCE)
 
