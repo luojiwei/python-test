@@ -1,9 +1,11 @@
 """perception.py — 感知：模板匹配、YOLO检测、小地图定位、游戏状态"""
 
 from dataclasses import dataclass, field
+import logging
 
 import cv2
 import numpy as np
+import torch
 
 from edge_types import EdgeType
 
@@ -13,6 +15,52 @@ from config import (
     MATCH_THRESHOLD, SEARCH_BOTTOM_SKIP_PCT,
     DOT_HSV_LOWER, DOT_HSV_UPPER,
 )
+
+_logger = logging.getLogger(__name__)
+
+
+def get_yolo_device() -> str | int:
+    """根据当前环境自动选择 YOLO 推理设备。
+
+    检测顺序: NVIDIA CUDA → AMD/Intel DirectML → CPU
+    """
+    # 1) NVIDIA CUDA
+    if torch.cuda.is_available():
+        _logger.info("YOLO 设备: CUDA (NVIDIA GPU)")
+        return 0  # ultralytics 用整数 0 表示 GPU0
+
+    # 2) AMD / Intel 显卡 → DirectML
+    try:
+        import torch_directml
+        dml = torch_directml.device()
+        _logger.info("YOLO 设备: DirectML (AMD/Intel GPU)")
+        return dml
+    except ImportError:
+        pass
+
+    # 3) CPU
+    _logger.info("YOLO 设备: CPU")
+    return "cpu"
+
+
+def move_model_to_device(yolo_model) -> None:
+    """将 ultralytics YOLO 模型的底层 PyTorch 模型迁移到当前设备。
+
+    调用时机: YOLO(yolo_path) 之后、首次 predict 之前。
+    """
+    device = get_yolo_device()
+    if device == "cpu":
+        return  # 已经是 CPU，无需移动
+
+    try:
+        if isinstance(device, int):
+            # CUDA: device=0
+            yolo_model.model.to(f"cuda:{device}")
+        else:
+            # DirectML device 对象
+            yolo_model.model.to(device)
+    except Exception as e:
+        _logger.warning(f"模型迁移到 {device} 失败: {e}，保持 CPU 运行")
 
 # ============================================================
 # 模板匹配 — 角色定位
@@ -41,7 +89,7 @@ def find_character(frame_bgr: np.ndarray, template_bgr: np.ndarray,
 def detect_monsters(model, frame_bgr: np.ndarray) -> list[dict]:
     """YOLO推理 → 只返回怪物"""
     results = model.predict(frame_bgr, conf=YOLO_CONF, iou=YOLO_IOU,
-                            device="cpu", verbose=False)
+                            device=get_yolo_device(), verbose=False)
     monsters: list[dict] = []
     for r in results:
         if r.boxes is None:

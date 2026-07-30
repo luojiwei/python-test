@@ -13,6 +13,7 @@ import numpy as np
 
 from config import PROJECT_DIR, SEARCH_BOTTOM_SKIP_PCT, validate_map_resources
 from input_utils import capture_frame, force_foreground
+from perception import move_model_to_device
 from world_model import WorldModel, load_world_model
 
 
@@ -99,6 +100,7 @@ class MapLoader:
             cfg.CLASS_NAMES.clear()
             cfg.CLASS_NAMES.update(yolo_model.model.names)
         self._log(f"YOLO: {len(cfg.CLASS_NAMES)}类  黑名单={cfg.NON_MONSTER_NAMES}")
+        move_model_to_device(yolo_model)
 
         # 5. 角色模板
         self._status("截取角色名模板...")
