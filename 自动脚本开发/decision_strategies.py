@@ -57,7 +57,6 @@ class DecisionStrategy(ABC):
         """根据 YOLO class_id 获取怪物中文名。"""
         return config.CLASS_NAMES.get(cls_id, f"cls_{cls_id}")
 
-    @staticmethod
     def _check_perception_freshness(self, state: GameState, log_lines: list[str]) -> bool:
         """检查感知数据是否新鲜。
 

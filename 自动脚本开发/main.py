@@ -39,7 +39,7 @@ from perception import (
 )
 from world_model import WorldModel
 from commands import Command, ClimbCommand, TimedAttackCommand, TurnAndAttackCommand
-from decision_strategies import decide, nearest_monster
+from decision_strategies import create_strategies, nearest_monster
 from key_actions import KeyActionManager
 from map_loader import MapLoader
 from perception_pipeline import PerceptionPipeline
@@ -83,6 +83,7 @@ class AutoFarmV2App:
         self.calib = Calibrator()
         self.frame_count: int = 0
         self.yolo_model = None
+        self._strategy = None           # 决策策略，延迟到 start() 初始化
         self._patrol_direction: str = "up"
         self._transition_in_progress: bool = False
         self._transition_start_time: float = 0.0
@@ -426,6 +427,9 @@ class AutoFarmV2App:
         for i, cfg in enumerate(self.skills.configs):
             self._log_error(f"  #{i} 名称={cfg['name']} 键位={cfg['key']} 持续={cfg['duration']}s")
 
+        # 初始化决策策略（按 patrol_mode 分发到对应策略实例）
+        self._strategy = create_strategies(self._get_effective_skill, log_cb=self._log_error)
+
         # 保存缓存（决策配置由 _save_config() 管理，此处只存 Buff）
         self.skills.save_cache()
 
@@ -695,16 +699,18 @@ class AutoFarmV2App:
                             self._log_error(tr.log_message)
                             self._current_waypoint_idx = self._recalc_waypoint()
                     else:
-                        cmd, self._patrol_direction, self._current_waypoint_idx, log_text = decide(
-                            self.state, wm, self._patrol_direction,
-                            self.transition.in_progress,
-                            self.min_monsters_var.get(),
-                            patrol_mode=self.patrol_mode_var.get(),
-                            patrol_waypoints=self._patrol_waypoints,
-                            current_waypoint_idx=self._current_waypoint_idx,
-                            return_method=self._patrol_return_method,
-                            get_skill_cb=self._get_effective_skill,
-                            log_cb=self._log_error)
+                        patrol_mode = self.patrol_mode_var.get()
+                        strategy = self._strategy.get(patrol_mode, self._strategy.get("auto_hunt"))
+                        if strategy is None:
+                            cmd, log_text = None, "无匹配策略"
+                        else:
+                            cmd, self._patrol_direction, self._current_waypoint_idx, log_text = strategy.decide(
+                                self.state, wm, self._patrol_direction,
+                                self.transition.in_progress,
+                                self.min_monsters_var.get(),
+                                patrol_waypoints=self._patrol_waypoints,
+                                current_waypoint_idx=self._current_waypoint_idx,
+                                return_method=self._patrol_return_method)
 
                         if cmd is not None:
                             self._current_command = cmd

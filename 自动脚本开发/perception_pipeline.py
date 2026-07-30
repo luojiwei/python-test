@@ -38,7 +38,7 @@ class PerceptionPipeline:
         self._monsters: list[dict] = []
         self._char_lost_frames: int = 0
         self._calib_predict_frames: int = 0   # 连续使用校准器推算的帧数
-        MAX_CALIB_PREDICT_FRAMES: int = 30    # 连续推算30帧后强制放弃
+        self.MAX_CALIB_PREDICT_FRAMES: int = 30    # 连续推算30帧后强制放弃
 
     def perceive(self, frame: np.ndarray, state: GameState,
                  target_hwnd: int, frame_count: int) -> None:
