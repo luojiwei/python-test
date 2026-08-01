@@ -1,0 +1,5 @@
+dataset/
+outputs/
+screenshots/
+__pycache__/
+*.pyc

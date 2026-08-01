@@ -1,0 +1,11 @@
+# YOLO 数据集配置 — 自动标注工具生成
+path: D:/Program Files (x86)/Tencent/WorkBuddy/python-test/脚本开发工具/YOLO自动标注工具/dataset
+train: images/train
+val: images/val
+nc: 5
+names:
+  0: 怪物
+  1: 绳子上
+  2: 绳子下
+  3: 梯子上
+  4: 梯子下
