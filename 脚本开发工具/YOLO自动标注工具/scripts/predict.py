@@ -34,7 +34,8 @@ def main():
     parser.add_argument("--project", default=None, help="输出目录")
     parser.add_argument("--conf", type=float, default=0.25, help="置信度阈值 (默认: 0.25)")
     parser.add_argument("--iou", type=float, default=0.45, help="NMS IoU 阈值 (默认: 0.45)")
-    parser.add_argument("--device", default="cpu", help="设备")
+    parser.add_argument("--device", default="auto",
+                        help="设备: auto (自动检测) / cpu / 0 (GPU编号)")
     parser.add_argument("--noshow", action="store_true", help="不弹窗显示，只保存文件")
     parser.add_argument("--save-txt", action="store_true", help="保存检测结果为 txt 文件")
     args = parser.parse_args()
@@ -53,15 +54,24 @@ def main():
     print(f"\n加载模型: {weights_path}")
     model = YOLO(str(weights_path))
 
+    # 解析设备
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    import gpu_utils
+    resolved_device = gpu_utils.resolve_device(args.device)
+    gpu_utils.patch_onnx_for_gpu()
+
     print(f"\n推理中...")
     print(f"  来源: {source_path}")
     print(f"  置信度阈值: {args.conf}")
+    print(f"  设备: {resolved_device} (原始: {args.device})")
 
     results = model.predict(
         source=str(source_path),
         conf=args.conf,
         iou=args.iou,
-        device=args.device,
+        device=resolved_device,
         save=True,
         save_txt=args.save_txt,
         project=str(output_dir / "results"),

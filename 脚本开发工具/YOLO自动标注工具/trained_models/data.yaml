@@ -1,5 +1,5 @@
 # YOLO 数据集配置 — 自动标注工具生成
-path: D:/Program Files (x86)/Tencent/WorkBuddy/python-test/脚本开发工具/YOLO自动标注工具/dataset
+path: F:/Program Files/WorkBuddy Works/python-test/脚本开发工具/YOLO自动标注工具/dataset
 train: images/train
 val: images/val
 nc: 5

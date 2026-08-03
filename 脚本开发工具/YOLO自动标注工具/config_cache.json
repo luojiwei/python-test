@@ -1,1 +1,3 @@
-{}
+{
+  "yolo_device": "dml:0"
+}

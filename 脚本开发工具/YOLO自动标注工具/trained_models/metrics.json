@@ -1,0 +1,10 @@
+{
+  "v2": {
+    "version": "v2",
+    "map50": 50.0,
+    "precision": 0.7762,
+    "recall": 0.885,
+    "images": 312,
+    "epochs": 100
+  }
+}

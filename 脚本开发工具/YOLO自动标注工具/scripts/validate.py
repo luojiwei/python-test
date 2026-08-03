@@ -23,7 +23,8 @@ def main():
     parser.add_argument("--weights", required=True, help="模型权重路径 (best.pt)")
     parser.add_argument("--data", default=None, help="数据集 yaml 路径")
     parser.add_argument("--project", default=None, help="输出目录")
-    parser.add_argument("--device", default="cpu", help="设备")
+    parser.add_argument("--device", default="auto",
+                        help="设备: auto (自动检测) / cpu / 0 (GPU编号)")
     parser.add_argument("--imgsz", type=int, default=640, help="图片尺寸")
     parser.add_argument("--batch", type=int, default=16, help="批次大小")
     parser.add_argument("--conf", type=float, default=0.001, help="置信度阈值")
@@ -42,14 +43,23 @@ def main():
     print(f"\n加载模型: {weights_path}")
     model = YOLO(str(weights_path))
 
+    # 解析设备
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    import gpu_utils
+    resolved_device = gpu_utils.resolve_device(args.device)
+    gpu_utils.patch_onnx_for_gpu()
+
     print(f"\n在验证集上评估...")
+    print(f"  设备: {resolved_device} (原始: {args.device})")
     metrics = model.val(
         data=str(dataset_yaml),
         imgsz=args.imgsz,
         batch=args.batch,
         conf=args.conf,
         iou=args.iou,
-        device=args.device,
+        device=resolved_device,
         project=str(output_dir / "results"),
         name="val",
         exist_ok=True,

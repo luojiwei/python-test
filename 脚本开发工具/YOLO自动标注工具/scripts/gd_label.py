@@ -25,11 +25,25 @@ def main():
     parser.add_argument("--conf", type=float, default=0.3, help="置信度阈值")
     parser.add_argument("--model", default="IDEA-Research/grounding-dino-tiny",
                         help="HuggingFace 模型ID: base(~700M) 或 tiny(~170M)")
-    parser.add_argument("--device", default="cpu", help="设备: cpu / cuda")
+    parser.add_argument("--device", default="auto",
+                        help="设备: auto (自动检测) / cpu / cuda")
     parser.add_argument("--img-width", type=int, default=1280, help="图片宽度")
     parser.add_argument("--img-height", type=int, default=720, help="图片高度")
 
     args = parser.parse_args()
+
+    # 解析设备
+    if args.device == "auto":
+        try:
+            import torch
+            if torch.cuda.is_available():
+                resolved_device = "cuda"
+            else:
+                resolved_device = "cpu"
+        except ImportError:
+            resolved_device = "cpu"
+    else:
+        resolved_device = args.device
 
     input_dir = Path(args.input)
     output_dir = Path(args.output)
@@ -46,6 +60,9 @@ def main():
     print(f"  提示词: {args.prompt}")
     print(f"  置信度: {args.conf}")
     print(f"  模型: {args.model}")
+    print(f"  设备: {resolved_device} (原始: {args.device})")
+    if resolved_device == "cpu" and args.device == "auto":
+        print(f"  注意: 未检测到 NVIDIA CUDA，使用 CPU。AMD GPU 请使用 YOLO 多模型标注（Tab 2）。")
 
     # ---- 加载模型 ----
     print("加载模型中 (首次需下载 ~170MB)...")
@@ -53,7 +70,7 @@ def main():
     detector = pipeline(
         "zero-shot-object-detection",
         model=args.model,
-        device=args.device,
+        device=resolved_device,
     )
     print("模型就绪")
 
