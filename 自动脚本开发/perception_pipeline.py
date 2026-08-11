@@ -25,6 +25,8 @@ class PerceptionPipeline:
                  search_region: tuple[int, int, int, int],
                  yolo_model, wm: WorldModel,
                  actions,   # KeyActionManager
+                 dot_hsv_lower: np.ndarray | None = None,
+                 dot_hsv_upper: np.ndarray | None = None,
                  log_cb=None) -> None:
         self.calib = calib
         self.template = template
@@ -32,6 +34,8 @@ class PerceptionPipeline:
         self.yolo_model = yolo_model
         self.wm = wm
         self.actions = actions
+        self.dot_hsv_lower = dot_hsv_lower
+        self.dot_hsv_upper = dot_hsv_upper
         self._log = log_cb or (lambda s: None)
 
         self._last_yolo: float = 0.0
@@ -98,7 +102,7 @@ class PerceptionPipeline:
         mm = capture_minimap(target_hwnd, tuple(self.wm.mm_region))
         dot = None
         if mm is not None:
-            dot = find_yellow_dot(mm)
+            dot = find_yellow_dot(mm, self.dot_hsv_lower, self.dot_hsv_upper)
             if dot is not None:
                 state.player_minimap_x = dot[0]
                 state.player_minimap_y = dot[1]

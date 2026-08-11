@@ -8,13 +8,15 @@ import numpy as np
 from PIL import Image, ImageTk
 
 try:
-    from .config import CAPTURE_FPS, MAPS_FILE, OUTPUT_DIR
+    from .config import CAPTURE_FPS, get_map_path, OUTPUT_DIR
     from .drawing import draw_jump_preview
     from .player_detection import PlayerTracker, detect_player_dot
+    from ..window_utils import capture_client
 except ImportError:
-    from config import CAPTURE_FPS, MAPS_FILE, OUTPUT_DIR  # type: ignore[no-redef]
+    from config import CAPTURE_FPS, get_map_path, OUTPUT_DIR  # type: ignore[no-redef]
     from drawing import draw_jump_preview  # type: ignore[no-redef]
     from player_detection import PlayerTracker, detect_player_dot  # type: ignore[no-redef]
+    from window_utils import capture_client  # type: ignore[no-redef]
 
 
 class JumpMixin:
@@ -74,24 +76,19 @@ class JumpMixin:
             btn.config(text="跳跃点标记", bg="#1abc9c", activebackground="#16a085")
 
     def _loop_jump(self, map_name: str) -> None:
-        import ctypes
-        sct = mss.MSS()
         interval: float = 1.0 / CAPTURE_FPS
         last_status: float = time.time()
         while self.running:
             t0: float = time.time()
             try:
-                r = ctypes.wintypes.RECT()
-                ctypes.windll.user32.GetWindowRect(self.target_hwnd, ctypes.byref(r))
-                gl, gt, gr, gb = r.left, r.top, r.right, r.bottom
-                if gr <= gl or gb <= gt: time.sleep(0.1); continue
                 ml, mt, mr, mb = self.mm_offsets
-                ml_abs: int = gl + ml; mt_abs: int = gt + mt
                 mw: int = mr - ml; mh: int = mb - mt
                 if mw <= 0 or mh <= 0: time.sleep(0.1); continue
-                region: dict = {"left": ml_abs, "top": mt_abs, "width": mw, "height": mh}
-                img_raw = sct.grab(region)
-                mm = np.array(img_raw)[:, :, :3]
+                frame = capture_client(self.target_hwnd)
+                if frame is None: time.sleep(0.1); continue
+                fh, fw = frame.shape[:2]
+                if mr > fw or mb > fh: time.sleep(0.1); continue
+                mm = frame[mt:mb, ml:mr]
                 if self._mm_snapshot is None:
                     self._mm_snapshot = Image.fromarray(mm[:, :, ::-1])
                 pos = detect_player_dot(mm, self.player_tracker)
@@ -116,23 +113,26 @@ class JumpMixin:
         try: self._jump_review_and_save_impl()
         except Exception as e:
             import traceback
+            err = traceback.format_exc()
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             with open(OUTPUT_DIR / "_jump_error.log", "w", encoding="utf-8") as f:
-                f.write(traceback.format_exc())
+                f.write(err)
             self.status_text.set(f"跳跃审阅窗口错误: {e}")
 
     def _jump_review_and_save_impl(self) -> None:
         map_name: str = self.map_name_var.get().strip()
+        win_name: str = self._window_var.get().strip()
+        map_path = get_map_path(win_name, map_name)
         yoff: int = self.jump_detector.y_offset
         new_jumps: list = [[fx, fy + yoff, tx, ty + yoff]
                            for fx, fy, tx, ty in self.jump_detector.jumps]
         old_jumps: list = []
-        if MAPS_FILE.exists():
-            with open(MAPS_FILE, "r", encoding="utf-8") as f:
-                data: dict = json.load(f)
-            old_jumps = data.get(map_name, {}).get("jumps", [])
+        if map_path.exists():
+            with open(map_path, "r", encoding="utf-8") as f:
+                old_jumps = json.load(f).get("jumps", [])
+            old_jumps = existing.get("jumps", [])
             if not old_jumps:
-                old_jumps = data.get(map_name, {}).get("teleports", [])
+                old_jumps = existing.get("teleports", [])
 
         sw, sh = self.mm_size
         scale: float = min(6.0, 700 / max(sw, sh, 1))
@@ -274,17 +274,18 @@ class JumpMixin:
 
     def _jump_save(self, map_name: str, jumps: list) -> None:
         if not map_name: return
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        if MAPS_FILE.exists():
-            with open(MAPS_FILE, "r", encoding="utf-8") as f: data = json.load(f)
-        else: data = {}
-        existing: dict = data.get(map_name, {})
+        win_name = self._window_var.get().strip()
+        map_path = get_map_path(win_name, map_name)
+        map_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = {}
+        if map_path.exists():
+            with open(map_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
         existing["jumps"] = jumps
         existing["minimap_size"] = list(self.mm_size)
         existing["mm_region"] = list(self.mm_offsets)
         if "platforms" not in existing: existing["platforms"] = []
         if "ropes" not in existing: existing["ropes"] = []
-        data[map_name] = existing
-        with open(MAPS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        self.status_text.set(f" {len(jumps)}个跳跃点已保存至 {MAPS_FILE.name}")
+        with open(map_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        self.status_text.set(f" {len(jumps)}个跳跃点已保存至 {map_path.name}")

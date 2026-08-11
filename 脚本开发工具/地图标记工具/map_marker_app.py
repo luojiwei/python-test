@@ -4,6 +4,7 @@
 """
 
 import json
+import ctypes
 import os
 import threading
 import time
@@ -15,9 +16,13 @@ import mss
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+# ---- 导入 ----
+
 try:
     from .anchor_system import AnchorResolver
-    from .config import CAPTURE_FPS, MAPS_FILE, OUTPUT_DIR, WINDOW_TITLE
+    from .config import (CAPTURE_FPS, OUTPUT_DIR, SYSTEM_SETTINGS_FILE,
+                         get_map_path, get_model_path,
+                         WINDOW_TITLE as DEFAULT_WINDOW_KEYWORD)
     from .detectors import FlashDetector, JumpDetector, PlatformRecorder, RopeDetector
     from .drawing import (
         draw_flash_preview,
@@ -32,10 +37,14 @@ try:
     from .player_detection import PlayerTracker, detect_player_dot
     from .rdp_simplify import rdp_simplify
     from .viewer import open_viewer
-    from .window_utils import find_window_by_title, force_foreground
+    from .window_utils import (capture_client, find_window_by_title,
+                               find_windows_by_title, enum_visible_windows,
+                               force_foreground)
 except ImportError:
     from anchor_system import AnchorResolver  # type: ignore[no-redef]
-    from config import CAPTURE_FPS, MAPS_FILE, OUTPUT_DIR, WINDOW_TITLE  # type: ignore[no-redef]
+    from config import (CAPTURE_FPS, OUTPUT_DIR, SYSTEM_SETTINGS_FILE,
+                        get_map_path, get_model_path,
+                        WINDOW_TITLE as DEFAULT_WINDOW_KEYWORD)  # type: ignore[no-redef]
     from detectors import (  # type: ignore[no-redef]
         FlashDetector,
         JumpDetector,
@@ -55,15 +64,15 @@ except ImportError:
     from player_detection import PlayerTracker, detect_player_dot  # type: ignore[no-redef]
     from rdp_simplify import rdp_simplify  # type: ignore[no-redef]
     from viewer import open_viewer  # type: ignore[no-redef]
-    from window_utils import find_window_by_title, force_foreground  # type: ignore[no-redef]
+    from window_utils import (capture_client, find_window_by_title,
+                              find_windows_by_title, enum_visible_windows,
+                              force_foreground)  # type: ignore[no-redef]
 
 
 class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
     """统一标记工具: 小地图标记 / 平台标记 / 绳梯标记 / 跳跃点标记 / 闪现点标记"""
 
     MODES = ("minimap", "platform", "rope", "jump", "flash")
-
-    PLATFORM_Y_OFFSET = 2
     PLATFORM_RDP_EPSILON = 2.5
 
     def __init__(self, root):
@@ -87,89 +96,128 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
 
         # ---- UI ----
         root.title("地图标记工具")
-        root.geometry("500x520")
+        root.geometry("500x590")
         root.resizable(False, False)
 
         tk.Label(root, text="地图标记工具",
                  font=("Microsoft YaHei", 14, "bold")).pack(pady=(12, 8))
 
-        # Map name + confirm button
-        f1 = tk.Frame(root)
-        f1.pack(pady=3)
-        tk.Label(f1, text="地图名称：", font=("Microsoft YaHei", 10), width=10,
+        # ---- Row 1: 游戏窗口 ----
+        f_win = tk.Frame(root)
+        f_win.pack(pady=(5, 0))
+        tk.Label(f_win, text="游戏窗口：", font=("Microsoft YaHei", 9),
+                 anchor="e").pack(side="left")
+        self._window_var = tk.StringVar(value="冒险岛怀旧服")
+        self._window_entry = tk.Entry(f_win, textvariable=self._window_var,
+                                      font=("Microsoft YaHei", 9), width=22)
+        self._window_entry.pack(side="left", padx=(4, 0))
+        self._window_entry.bind("<Return>", lambda e: self._find_game_window())
+        self._window_entry.bind("<FocusOut>", lambda e: self._find_game_window())
+        btn_pick = tk.Button(f_win, text="选择窗口", font=("Microsoft YaHei", 9),
+                             width=8, cursor="hand2", command=self._pick_window)
+        btn_pick.pack(side="left", padx=(4, 0))
+
+        # ---- Row 2: 已连接状态 ----
+        self.lbl_window = tk.Label(root, text="",
+                                   font=("Microsoft YaHei", 9), fg="#888")
+        self.lbl_window.pack(pady=(0, 3))
+
+        # ---- Row 3: 地图名称 ----
+        from tkinter import ttk
+        f_map = tk.Frame(root)
+        f_map.pack(pady=3)
+        tk.Label(f_map, text="地图名称：", font=("Microsoft YaHei", 10),
                  anchor="e").pack(side="left")
         self.map_name_var = tk.StringVar(value="")
-        self.map_name_entry = tk.Entry(f1, textvariable=self.map_name_var,
-                                      font=("Microsoft YaHei", 10), width=18)
-        self.map_name_entry.pack(side="left", padx=(5, 0))
-        self.map_name_entry.bind("<Return>", lambda e: self._on_map_confirm())
-        self.confirm_btn = tk.Button(f1, text="确定", font=("Microsoft YaHei", 9),
+        self.map_name_combo = ttk.Combobox(f_map, textvariable=self.map_name_var,
+                                            font=("Microsoft YaHei", 10), width=18)
+        self.map_name_combo.pack(side="left", padx=(4, 4))
+        self.map_name_combo.bind("<Return>", lambda e: self._on_map_confirm())
+        self.confirm_btn = tk.Button(f_map, text="确定", font=("Microsoft YaHei", 9),
                                      width=5, cursor="hand2", command=self._on_map_confirm)
-        self.confirm_btn.pack(side="left", padx=(4, 0))
+        self.confirm_btn.pack(side="left")
 
-        # Minimap marking button (between map name and coords)
+        # ---- Row 4: 小地图坐标 ----
+        f_mmc = tk.Frame(root)
+        f_mmc.pack(pady=3)
+        tk.Label(f_mmc, text="小地图坐标：", font=("Microsoft YaHei", 9),
+                 anchor="e").pack(side="left")
+        self.mm_left_var = tk.StringVar(value="")
+        tk.Entry(f_mmc, textvariable=self.mm_left_var, width=5,
+                 font=("Courier", 10)).pack(side="left", padx=2)
+        self.mm_top_var = tk.StringVar(value="")
+        tk.Entry(f_mmc, textvariable=self.mm_top_var, width=5,
+                 font=("Courier", 10)).pack(side="left", padx=2)
+        self.mm_right_var = tk.StringVar(value="")
+        tk.Entry(f_mmc, textvariable=self.mm_right_var, width=5,
+                 font=("Courier", 10)).pack(side="left", padx=2)
+        self.mm_bottom_var = tk.StringVar(value="")
+        tk.Entry(f_mmc, textvariable=self.mm_bottom_var, width=5,
+                 font=("Courier", 10)).pack(side="left", padx=2)
+
+        # ---- 分隔 ----
+        tk.Frame(root, height=1, bg="#ccc").pack(fill="x", padx=20, pady=6)
+
+        # ---- Row 6: 小地图标记 查看标记 世界模型 巡逻路线 ----
         self.mode_buttons = {}
-        f_mm = tk.Frame(root)
-        f_mm.pack(pady=3)
-        btn_mm = tk.Button(f_mm, text="小地图标记", font=("Microsoft YaHei", 10, "bold"),
+        f_tools = tk.Frame(root)
+        f_tools.pack(pady=3)
+        btn_mm = tk.Button(f_tools, text="小地图标记", font=("Microsoft YaHei", 10, "bold"),
                            width=12, height=1, bg="#3498db", fg="white",
                            activebackground="#2980b9", relief="flat", cursor="hand2",
                            command=self._on_minimap_mark)
         btn_mm.pack(side="left", padx=2)
         self.mode_buttons["minimap"] = btn_mm
 
-        btn_view = tk.Button(f_mm, text="查看标记", font=("Microsoft YaHei", 10, "bold"),
+        btn_view = tk.Button(f_tools, text="查看标记", font=("Microsoft YaHei", 10, "bold"),
                              width=12, height=1, bg="#27ae60", fg="white",
                              activebackground="#1e8449", relief="flat", cursor="hand2",
                              command=lambda: open_viewer(self))
         btn_view.pack(side="left", padx=2)
         self.mode_buttons["view"] = btn_view
 
-        btn_model = tk.Button(f_mm, text="模型生成", font=("Microsoft YaHei", 10, "bold"),
+        btn_model = tk.Button(f_tools, text="世界模型", font=("Microsoft YaHei", 10, "bold"),
                               width=12, height=1, bg="#8e44ad", fg="white",
                               activebackground="#6c3483", relief="flat", cursor="hand2",
                               command=lambda: open_model_generator(self))
         btn_model.pack(side="left", padx=2)
         self.mode_buttons["model"] = btn_model
 
-        btn_patrol = tk.Button(f_mm, text="巡逻路线", font=("Microsoft YaHei", 10, "bold"),
+        btn_patrol = tk.Button(f_tools, text="巡逻路线", font=("Microsoft YaHei", 10, "bold"),
                                 width=12, height=1, bg="#e74c3c", fg="white",
                                 activebackground="#c0392b", relief="flat", cursor="hand2",
                                 command=lambda: open_patrol_route_editor(self))
         btn_patrol.pack(side="left", padx=2)
         self.mode_buttons["patrol"] = btn_patrol
 
-        # Minimap coords
-        f2 = tk.Frame(root)
-        f2.pack(pady=3)
-        tk.Label(f2, text="小地图坐标：", font=("Microsoft YaHei", 9),
-                 width=10, anchor="e").pack(side="left")
-        self.mm_left_var = tk.StringVar(value="")
-        tk.Entry(f2, textvariable=self.mm_left_var, width=5,
-                 font=("Courier", 10)).pack(side="left", padx=2)
-        self.mm_top_var = tk.StringVar(value="")
-        tk.Entry(f2, textvariable=self.mm_top_var, width=5,
-                 font=("Courier", 10)).pack(side="left", padx=2)
-        tk.Label(f2, text="~", font=("Microsoft YaHei", 9)).pack(side="left", padx=2)
-        self.mm_right_var = tk.StringVar(value="")
-        tk.Entry(f2, textvariable=self.mm_right_var, width=5,
-                 font=("Courier", 10)).pack(side="left", padx=2)
-        self.mm_bottom_var = tk.StringVar(value="")
-        tk.Entry(f2, textvariable=self.mm_bottom_var, width=5,
-                 font=("Courier", 10)).pack(side="left", padx=2)
+        # ---- Row 7: 模板标记 ----
+        f_tmpl = tk.Frame(root)
+        f_tmpl.pack(pady=1)
+        btn_template = tk.Button(f_tmpl, text="模板标记", font=("Microsoft YaHei", 10, "bold"),
+                                 width=12, height=1, bg="#2c3e50", fg="white",
+                                 activebackground="#1a252f", relief="flat", cursor="hand2",
+                                 command=self._on_template_mark)
+        btn_template.pack(side="left", padx=2)
+        self.mode_buttons["template"] = btn_template
 
-        # Game window
-        self.lbl_window = tk.Label(root, text="游戏: (检测中...)",
-                                   font=("Microsoft YaHei", 9), fg="#888")
-        self.lbl_window.pack(pady=(5, 3))
+        btn_hpmp = tk.Button(f_tmpl, text="HP/MP标记", font=("Microsoft YaHei", 10, "bold"),
+                             width=12, height=1, bg="#7f8c8d", fg="white",
+                             activebackground="#666", relief="flat", cursor="hand2",
+                             command=self._on_hpmp_mark)
+        btn_hpmp.pack(side="left", padx=2)
+        self.mode_buttons["hpmp"] = btn_hpmp
 
-        # Try auto-detect game window on startup
-        self._find_game_window()
+        btn_search = tk.Button(f_tmpl, text="搜索范围标记", font=("Microsoft YaHei", 10, "bold"),
+                                width=14, height=1, bg="#7f8c8d", fg="white",
+                                activebackground="#666", relief="flat", cursor="hand2",
+                                command=self._on_search_region_mark)
+        btn_search.pack(side="left", padx=2)
+        self.mode_buttons["search_region"] = btn_search
 
-        # Separator
+        # ---- 分隔 ----
         tk.Frame(root, height=1, bg="#ccc").pack(fill="x", padx=20, pady=6)
 
-        # Function buttons grid
+        # ---- Row 9-10: 平台 绳梯 / 跳跃 闪现 ----
         grid = tk.Frame(root)
         grid.pack(pady=4)
 
@@ -188,26 +236,184 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
             btn.grid(row=row, column=col, padx=4, pady=4)
             self.mode_buttons[key] = btn
 
-        # Separator
+        # ---- 分隔 ----
         tk.Frame(root, height=1, bg="#ccc").pack(fill="x", padx=20, pady=6)
 
         # Status
         tk.Label(root, textvariable=self.status_text,
                  font=("Microsoft YaHei", 9), fg="#333").pack(pady=(2, 6))
 
+        # Auto-detect on startup
+        self._find_game_window()
+
+    def _refresh_map_dropdown(self):
+        """扫描 {窗口名}/ 目录下已有的 *_maps.json 作为下拉选项。"""
+        win_name = self._window_var.get().strip()
+        if not win_name:
+            self.map_name_combo["values"] = []
+            return
+        safe_win = win_name
+        for ch in '<>:"/\\|?*':
+            safe_win = safe_win.replace(ch, '_')
+        mm_dir = OUTPUT_DIR / safe_win
+        maps = []
+        if mm_dir.is_dir():
+            for f in sorted(mm_dir.iterdir()):
+                if f.name.endswith("_maps.json"):
+                    maps.append(f.name[:-len("_maps.json")])
+        self.map_name_combo["values"] = maps
+
     # ==================== Helpers ====================
 
     def _find_game_window(self):
-        """Try to auto-detect the game window and update the label."""
-        win = find_window_by_title(WINDOW_TITLE)
+        """Auto-detect game window by keyword, update label & map dropdown."""
+        keyword = self._window_var.get().strip()
+        if not keyword:
+            self.target_hwnd = None
+            self.lbl_window.config(text="未找到游戏窗口", fg="#e74c3c")
+            return
+        win = find_window_by_title(keyword)
         if win:
             hwnd, title, gl, gt, gr, gb = win
             self.target_hwnd = hwnd
+            self._window_var.set(title)
             self.lbl_window.config(
-                text=f"游戏: {title[:40]}  ({gr-gl}x{gb-gt})",
+                text=f"已连接: {title}  ({gr-gl}x{gb-gt})",
                 fg="#2ecc71")
+            # 强制前置
+            try:
+                force_foreground(hwnd)
+            except Exception:
+                pass
         else:
-            self.lbl_window.config(text=f"游戏: 未找到 '{WINDOW_TITLE}'", fg="#e74c3c")
+            self.target_hwnd = None
+            self.lbl_window.config(text=f"未找到 '{keyword}'", fg="#e74c3c")
+        # 刷新地图下拉列表
+        self._refresh_map_dropdown()
+
+    def _get_window_rect(self):
+        """获取目标窗口当前矩形区域。
+
+        Returns:
+            (left, top, right, bottom) or None
+        """
+        if self.target_hwnd is None:
+            return None
+        try:
+            r = ctypes.wintypes.RECT()
+            ctypes.windll.user32.GetWindowRect(self.target_hwnd, ctypes.byref(r))
+            return (r.left, r.top, r.right, r.bottom)
+        except Exception:
+            return None
+
+    def _update_window_label(self, win_info=None):
+        """更新窗口状态标签。"""
+        if self.target_hwnd is None:
+            self.lbl_window.config(text="状态: 未选择窗口", fg="#888")
+            return
+        try:
+            r = ctypes.wintypes.RECT()
+            ctypes.windll.user32.GetWindowRect(self.target_hwnd, ctypes.byref(r))
+            w, h = r.right - r.left, r.bottom - r.top
+            title = self._window_var.get()[:40]
+            self.lbl_window.config(text=f"已连接: {title}  ({w}x{h})", fg="#2ecc71")
+        except Exception:
+            self.lbl_window.config(text="状态: 窗口信息获取失败", fg="#e74c3c")
+
+    def _pick_window(self):
+        """按输入的关键词模糊匹配选择窗口。"""
+        title = self._window_var.get().strip()
+        if not title:
+            self.status_text.set("请先输入窗口标题关键词")
+            return
+        windows = find_windows_by_title(title)
+        if not windows:
+            self.status_text.set(f"未找到包含 '{title}' 的窗口")
+            return
+        if len(windows) == 1:
+            self.target_hwnd = windows[0][0]
+            self._window_var.set(windows[0][1])
+            self._update_window_label()
+            self.status_text.set(f"已选择窗口: {windows[0][1][:40]}")
+            return
+        self._show_window_dialog(windows, f"选择窗口 — 匹配 '{title}'")
+
+    def _browse_windows(self):
+        """列出所有可见窗口供选择。"""
+        windows = enum_visible_windows(200, 200)
+        if not windows:
+            self.status_text.set("未找到可用窗口 (>=200x200)")
+            return
+        self._show_window_dialog(windows, "浏览窗口")
+
+    def _show_window_dialog(self, windows: list, title: str = "选择窗口"):
+        """显示窗口选择对话框。
+
+        Args:
+            windows: [(hwnd, title, left, top, right, bottom, pid), ...]
+            title: 对话框标题
+        """
+        result = [None]
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.geometry("700x380")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text=f"找到 {len(windows)} 个窗口，请选择:",
+                 font=("Microsoft YaHei", 10)).pack(pady=(10, 4))
+
+        list_frame = tk.Frame(dlg)
+        list_frame.pack(fill="both", expand=True, padx=12, pady=4)
+
+        scrollbar = tk.Scrollbar(list_frame)
+        scrollbar.pack(side="right", fill="y")
+
+        lb = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
+                        font=("Courier", 9), width=95, height=14)
+        scrollbar.config(command=lb.yview)
+        lb.pack(fill="both", expand=True)
+
+        for i, (_, wt, l, t, r, b, pid) in enumerate(windows):
+            wt_short = wt[:52] + ("..." if len(wt) > 52 else "")
+            lb.insert("end", f"[{i:02d}] {wt_short:<55} {r-l}x{b-t:<10} PID={pid}")
+        lb.selection_set(0)
+
+        def _on_ok():
+            sel = lb.curselection()
+            if sel:
+                result[0] = windows[sel[0]]
+            dlg.destroy()
+
+        lb.bind("<Double-Button-1>", lambda e: _on_ok())
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=(4, 10))
+        tk.Button(btn_frame, text="确定", font=("Microsoft YaHei", 9),
+                  width=10, command=_on_ok).pack(side="left", padx=4)
+        tk.Button(btn_frame, text="取消", font=("Microsoft YaHei", 9),
+                  width=10, command=dlg.destroy).pack(side="left", padx=4)
+
+        # 居中于父窗口
+        dlg.update_idletasks()
+        px = self.root.winfo_rootx()
+        py = self.root.winfo_rooty()
+        pw = self.root.winfo_width()
+        ph = self.root.winfo_height()
+        dw = dlg.winfo_width()
+        dh = dlg.winfo_height()
+        dlg.geometry(f"+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+
+        dlg.wait_window()
+
+        if result[0] is not None:
+            hwnd, wt, l, t, r, b, pid = result[0]
+            self.target_hwnd = hwnd
+            self._window_var.set(wt)
+            self._update_window_label()
+            self.status_text.set(f"已选择窗口: {wt[:40]}")
 
     def _set_mode_buttons(self, state, except_key=None):
         for key, btn in self.mode_buttons.items():
@@ -229,26 +435,25 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
         if mw <= 0 or mh <= 0:
             return
         try:
-            import ctypes, mss, numpy as np
-            r = ctypes.wintypes.RECT()
-            ctypes.windll.user32.GetWindowRect(self.target_hwnd, ctypes.byref(r))
-            gl, gt = r.left, r.top
-            region = {"left": gl + ml, "top": gt + mt, "width": mw, "height": mh}
-            sct = mss.mss()
-            img_raw = sct.grab(region)
-            mm = np.array(img_raw)[:, :, :3]
+            frame = capture_client(self.target_hwnd)
+            if frame is None:
+                return
+            mm = frame[mt:mb, ml:mr]
             self._mm_snapshot = Image.fromarray(mm[:, :, ::-1])
         except Exception:
             pass
 
     def _load_map_config(self, map_name):
-        """从 maps.json 读取指定地图配置，不存在返回 None。"""
-        if not MAPS_FILE.exists():
+        """从 {窗口名}/{地图名}_maps.json 读取配置，不存在返回 None。"""
+        win_name = self._window_var.get().strip()
+        if not win_name:
+            return None
+        map_path = get_map_path(win_name, map_name)
+        if not map_path.exists():
             return None
         try:
-            with open(MAPS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get(map_name)
+            with open(map_path, "r", encoding="utf-8") as f:
+                return json.load(f)
         except (json.JSONDecodeError, OSError):
             return None
 
@@ -269,13 +474,8 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
             self.status_text.set("请先标记小地图")
             return False
         if self.target_hwnd is None:
-            win = find_window_by_title(WINDOW_TITLE)
-            if win is None:
-                self.status_text.set(f"未找到游戏窗口 '{WINDOW_TITLE}'，请先打开游戏")
-                return False
-            hwnd, title, gl, gt, gr, gb = win
-            self.target_hwnd = hwnd
-            self.lbl_window.config(text=f"游戏: {title[:40]}  ({gr-gl}x{gb-gt})")
+            self.status_text.set("请先选择游戏窗口")
+            return False
         return True
 
     # ==================== Map name confirm / change ====================
@@ -324,15 +524,15 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
                 self.status_text.set(" | ".join(parts))
 
             self.map_confirmed = True
-            self.map_name_entry.config(state="disabled")
+            self.map_name_combo.config(state="disabled")
             self.confirm_btn.config(text="更改")
         else:
             self.map_confirmed = False
             self.minimap_marked = False
             self._clear_mm_coords()
-            self.map_name_entry.config(state="normal")
+            self.map_name_combo.config(state="normal")
             self.confirm_btn.config(text="确定")
-            self.status_text.set("请输入地图名称并点击确定")
+            self.status_text.set("请选择或输入地图名称")
 
     # ==================== 1. Minimap marking ====================
 
@@ -342,25 +542,14 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
         if not self.map_confirmed:
             self.status_text.set("请先输入地图名称并点击确定")
             return
-        win = find_window_by_title(WINDOW_TITLE)
-        if win is None:
-            self.status_text.set(f"未找到窗口 '{WINDOW_TITLE}'，请先打开游戏")
+        if self.target_hwnd is None:
+            self.status_text.set("请先选择游戏窗口")
             return
-        hwnd, title, gl, gt, gr, gb = win
-        self.target_hwnd = hwnd
-        self.lbl_window.config(text=f"游戏: {title[:40]}  ({gr-gl}x{gb-gt})")
 
-        try:
-            force_foreground(hwnd)
-        except Exception:
-            pass
-        time.sleep(0.4)
-
-        import ctypes
-        sct = mss.mss()
-        region = {"left": max(0, gl), "top": max(0, gt),
-                  "width": gr - gl, "height": gb - gt}
-        img = np.array(sct.grab(region))[:, :, :3]
+        img = capture_client(self.target_hwnd)
+        if img is None:
+            self.status_text.set("截图失败")
+            return
 
         max_dim = max(img.shape[:2])
         scale = max(1.2, min(2.0, 1600.0 / max_dim))
@@ -391,4 +580,231 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
         self.mm_size = (x2 - x1, y2 - y1)
 
         self.minimap_marked = True
-        self.status_text.set(f"已框选小地图: ({x1},{y1})-({x2},{y2}) {rw}x{rh}px")
+        self.status_text.set(f"已框选小地图(客户区坐标): ({x1},{y1})-({x2},{y2}) {rw}x{rh}px")
+
+    # ==================== 1b. Template marking (角色名模板) ====================
+
+    def _on_template_mark(self):
+        """标记角色名模板区域，按窗口名保存到 system_setting.json。"""
+        if self.running:
+            return
+        if self.target_hwnd is None:
+            self.status_text.set("请先选择游戏窗口")
+            return
+
+        # 获取当前窗口完整标题
+        win_title = self._window_var.get().strip()
+        if not win_title:
+            self.status_text.set("无法获取窗口标题")
+            return
+
+        img = capture_client(self.target_hwnd)
+        if img is None:
+            self.status_text.set("截图失败")
+            return
+
+        win_h, win_w = img.shape[:2]
+
+        # 缩放显示
+        max_dim = max(img.shape[:2])
+        scale = max(1.2, min(2.0, 1600.0 / max_dim))
+        interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_LINEAR
+        disp = cv2.resize(img, None, fx=scale, fy=scale, interpolation=interp)
+
+        cv2.namedWindow("Drag to select character name area, then press ENTER",
+                        cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Drag to select character name area, then press ENTER",
+                         disp.shape[1], disp.shape[0] + 30)
+        roi = cv2.selectROI("Drag to select character name area, then press ENTER",
+                            disp, False)
+        cv2.destroyAllWindows()
+
+        if roi[2] == 0 or roi[3] == 0:
+            self.status_text.set("已取消模板框选")
+            return
+
+        rx, ry, rw, rh = roi
+        x1 = int(rx / scale)
+        y1 = int(ry / scale)
+        x2 = x1 + int(rw / scale)
+        y2 = y1 + int(rh / scale)
+        rect_data = [x1, y1, x2, y2]
+
+        # 保存到 system_setting.json（嵌套结构）
+        settings = {}
+        if SYSTEM_SETTINGS_FILE.exists():
+            try:
+                with open(SYSTEM_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # 合并更新：保留已有字段，只更新 template_rect 和 window_size
+        entry = settings.get(win_title, {})
+        if not isinstance(entry, dict):
+            # 兼容旧格式（直接是数组）
+            entry = {}
+        entry["template_rect"] = rect_data
+        entry["window_size"] = [win_w, win_h]
+        settings[win_title] = entry
+
+        SYSTEM_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(SYSTEM_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+
+        self.status_text.set(
+            f"已标记模板 [{win_title[:25]}]: ({x1},{y1})-({x2},{y2}) {rw}x{rh}px"
+            f"  窗口 {win_w}x{win_h} → {SYSTEM_SETTINGS_FILE.name}"
+        )
+
+    def _on_hpmp_mark(self):
+        """框选 HP 和 MP 文字区域，存入 system_setting.json。"""
+        if self.running:
+            return
+        if self.target_hwnd is None:
+            self.status_text.set("请先选择游戏窗口")
+            return
+
+        win_title = self._window_var.get().strip()
+        if not win_title:
+            self.status_text.set("无法获取窗口标题")
+            return
+
+        self.status_text.set("正在截取画面...")
+        img = capture_client(self.target_hwnd)
+        if img is None:
+            self.status_text.set("截图失败")
+            return
+
+        win_h, win_w = img.shape[:2]
+        max_dim = max(img.shape[:2])
+        scale = max(1.2, min(2.0, 1600.0 / max_dim))
+        interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_LINEAR
+        disp = cv2.resize(img, None, fx=scale, fy=scale, interpolation=interp)
+
+        # Step 1: 框选 HP 区域
+        cv2.namedWindow("1/2: Drag to select HP area, press ENTER", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("1/2: Drag to select HP area, press ENTER",
+                         disp.shape[1], disp.shape[0] + 30)
+        hp_roi = cv2.selectROI("1/2: Drag to select HP area, press ENTER", disp, False)
+        cv2.destroyAllWindows()
+
+        if hp_roi[2] == 0 or hp_roi[3] == 0:
+            self.status_text.set("已取消 HP/MP 标记")
+            return
+
+        hx1 = int(hp_roi[0] / scale)
+        hy1 = int(hp_roi[1] / scale)
+        hx2 = hx1 + int(hp_roi[2] / scale)
+        hy2 = hy1 + int(hp_roi[3] / scale)
+
+        # Step 2: 框选 MP 区域
+        cv2.namedWindow("2/2: Drag to select MP area, press ENTER", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("2/2: Drag to select MP area, press ENTER",
+                         disp.shape[1], disp.shape[0] + 30)
+        mp_roi = cv2.selectROI("2/2: Drag to select MP area, press ENTER", disp, False)
+        cv2.destroyAllWindows()
+
+        if mp_roi[2] == 0 or mp_roi[3] == 0:
+            self.status_text.set("已取消 HP/MP 标记")
+            return
+
+        mx1 = int(mp_roi[0] / scale)
+        my1 = int(mp_roi[1] / scale)
+        mx2 = mx1 + int(mp_roi[2] / scale)
+        my2 = my1 + int(mp_roi[3] / scale)
+
+        # 保存到 system_setting.json
+        settings = {}
+        if SYSTEM_SETTINGS_FILE.exists():
+            try:
+                with open(SYSTEM_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        entry = settings.get(win_title, {})
+        if not isinstance(entry, dict):
+            entry = {}
+        entry["hp_rect"] = [hx1, hy1, hx2, hy2]
+        entry["mp_rect"] = [mx1, my1, mx2, my2]
+        entry["window_size"] = [win_w, win_h]
+        settings[win_title] = entry
+
+        SYSTEM_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(SYSTEM_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+
+        self.status_text.set(
+            f"已标记 HP/MP [{win_title[:25]}]: "
+            f"HP({hx1},{hy1})-({hx2},{hy2}) "
+            f"MP({mx1},{my1})-({mx2},{my2})"
+        )
+
+    def _on_search_region_mark(self):
+        """标记角色搜索范围（避免搜到底部 UI 区域），按窗口名保存到 system_setting.json。"""
+        if self.running:
+            return
+        if self.target_hwnd is None:
+            self.status_text.set("请先选择游戏窗口")
+            return
+
+        win_title = self._window_var.get().strip()
+        if not win_title:
+            self.status_text.set("无法获取窗口标题")
+            return
+
+        img = capture_client(self.target_hwnd)
+        if img is None:
+            self.status_text.set("截图失败")
+            return
+
+        win_h, win_w = img.shape[:2]
+
+        max_dim = max(img.shape[:2])
+        scale = max(1.2, min(2.0, 1600.0 / max_dim))
+        interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_LINEAR
+        disp = cv2.resize(img, None, fx=scale, fy=scale, interpolation=interp)
+
+        cv2.namedWindow("Drag to select search region, then press ENTER",
+                        cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Drag to select search region, then press ENTER",
+                         disp.shape[1], disp.shape[0] + 30)
+        roi = cv2.selectROI("Drag to select search region, then press ENTER",
+                            disp, False)
+        cv2.destroyAllWindows()
+
+        if roi[2] == 0 or roi[3] == 0:
+            self.status_text.set("已取消搜索范围框选")
+            return
+
+        rx, ry, rw, rh = roi
+        x1 = int(rx / scale)
+        y1 = int(ry / scale)
+        x2 = x1 + int(rw / scale)
+        y2 = y1 + int(rh / scale)
+        rect_data = [x1, y1, x2, y2]
+
+        settings = {}
+        if SYSTEM_SETTINGS_FILE.exists():
+            try:
+                with open(SYSTEM_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # 合并更新
+        entry = settings.get(win_title, {})
+        if not isinstance(entry, dict):
+            entry = {}
+        entry["search_region"] = rect_data
+        entry["window_size"] = [win_w, win_h]
+        settings[win_title] = entry
+
+        SYSTEM_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(SYSTEM_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+
+        self.status_text.set(
+            f"已标记搜索范围 [{win_title[:25]}]: ({x1},{y1})-({x2},{y2})"
+        )

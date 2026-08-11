@@ -9,10 +9,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 try:
     from .anchor_system import AnchorResolver
-    from .config import MAPS_FILE
+    from .config import get_map_path
 except ImportError:
     from anchor_system import AnchorResolver  # type: ignore[no-redef]
-    from config import MAPS_FILE  # type: ignore[no-redef]
+    from config import get_map_path  # type: ignore[no-redef]
 
 
 def open_patrol_route_editor(app) -> None:
@@ -20,9 +20,11 @@ def open_patrol_route_editor(app) -> None:
     if app.running: app.status_text.set("标记运行中，请先停止"); return
     map_name: str = app.map_name_var.get().strip()
     if not map_name: app.status_text.set("请先输入地图名称"); return
-    if not MAPS_FILE.exists(): app.status_text.set("maps.json 不存在，请先标记地图"); return
-    with open(MAPS_FILE, "r", encoding="utf-8") as f: data: dict = json.load(f)
-    map_cfg: dict = data.get(map_name, {})
+    win_name: str = app._window_var.get().strip()
+    if not win_name: app.status_text.set("请先选择游戏窗口"); return
+    map_path = get_map_path(win_name, map_name)
+    if not map_path.exists(): app.status_text.set(f"{map_path.name} 不存在，请先标记地图"); return
+    with open(map_path, "r", encoding="utf-8") as f: map_cfg: dict = json.load(f)
     platforms_raw: list = map_cfg.get("platforms", [])
     ropes: list = map_cfg.get("ropes", [])
     jumps: list = map_cfg.get("jumps", [])
@@ -262,12 +264,16 @@ def open_patrol_route_editor(app) -> None:
 
     def _save() -> None:
         _sync_waypoints()
-        with open(MAPS_FILE, "r", encoding="utf-8") as f: all_data: dict = json.load(f)
+        if map_path.exists():
+            with open(map_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        else:
+            existing = {}
         route_data = {"route_name": name_var.get().strip() or "默认巡逻路线", "waypoints": list(waypoints),
                       "return_method": return_method_var.get()}
-        all_data.setdefault(map_name, {})["patrol_routes"] = [route_data]
-        with open(MAPS_FILE, "w", encoding="utf-8") as f:
-            json.dump(all_data, f, ensure_ascii=False, indent=2)
+        existing["patrol_routes"] = [route_data]
+        with open(map_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
         app.status_text.set(f"巡逻路线已保存到 {map_name}")
         win.destroy()
 

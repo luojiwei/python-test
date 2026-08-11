@@ -132,6 +132,8 @@ def map_class(cls_name: str) -> int | None:
         2 = 绳子下
         3 = 梯子上
         4 = 梯子下
+        5 = 玩家
+        6 = 宠物
     """
     cls_name = cls_name.strip()
     mapping = {
@@ -142,6 +144,10 @@ def map_class(cls_name: str) -> int | None:
         "绳子上": 1, "绳子下": 2, "rope_top": 1, "rope_bottom": 2,
         # 梯子 -> 3/4
         "梯子上": 3, "梯子下": 4, "ladder_top": 3, "ladder_bottom": 4,
+        # 玩家 -> 5
+        "玩家": 5, "player": 5,
+        # 宠物 -> 6
+        "宠物": 6, "pet": 6,
     }
     # 未映射的默认为怪物（class 0）
     return mapping.get(cls_name, 0)

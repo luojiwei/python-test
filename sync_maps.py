@@ -4,15 +4,13 @@
 
 将"地图标记工具"产出的数据同步到"自动脚本"的 maps/ 目录。
 
-同步内容:
-  - world_model.json  ←  {map}_model.json
-  - markers.json       ←  maps.json（提取该地图数据 + patrol_routes）
-  - best.pt            ←  YOLO训练工具/trained_models/{map}/best.pt
-  - config.json        ←  保留已有（如不存在则提示手动创建）
+新结构: marker_output/{窗口名}/{地图名}_maps.json → maps/{窗口名}/{地图名}/markers.json
+        marker_output/{窗口名}/{地图名}_model.json → maps/{窗口名}/{地图名}/world_model.json
 
 用法:
-    python sync_maps.py              # 同步所有地图
-    python sync_maps.py 射手训练场1    # 同步指定地图
+    python sync_maps.py                        # 同步所有窗口所有地图
+    python sync_maps.py 冒险岛怀旧服               # 同步指定窗口
+    python sync_maps.py 冒险岛怀旧服 地铁一号线     # 同步指定窗口指定地图
 """
 
 import json
@@ -23,55 +21,75 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DEV_DIR = ROOT / "脚本开发工具"
 MARKER_OUT = DEV_DIR / "地图标记工具" / "marker_output"
-MAPS_JSON = MARKER_OUT / "maps.json"
 YOLO_MODELS = DEV_DIR / "YOLO训练工具" / "trained_models"
 TARGET_DIR = ROOT / "自动脚本开发" / "maps"
 
 
-def load_maps_json() -> dict:
-    if not MAPS_JSON.exists():
-        print(f"[错误] maps.json 不存在: {MAPS_JSON}")
-        return {}
-    with open(MAPS_JSON, "r", encoding="utf-8") as f:
-        return json.load(f)
+def _safe(name: str) -> str:
+    """Windows 非法字符替换。"""
+    for ch in '<>:"/\\|?*':
+        name = name.replace(ch, '_')
+    return name
 
 
-def sync_map(map_name: str, maps_data: dict) -> int:
-    """同步单个地图，返回同步的文件数。"""
-    map_dir = TARGET_DIR / map_name
+def discover_window_maps() -> dict[str, list[str]]:
+    """扫描 marker_output，返回 {窗口名: [地图名列表]}"""
+    result: dict[str, list[str]] = {}
+    if not MARKER_OUT.is_dir():
+        return result
+    for win_dir in sorted(MARKER_OUT.iterdir()):
+        if not win_dir.is_dir() or win_dir.name.startswith("."):
+            continue
+        maps = []
+        for f in sorted(win_dir.iterdir()):
+            if f.name.endswith("_maps.json"):
+                map_name = f.name[:-len("_maps.json")]
+                maps.append(map_name)
+        if maps:
+            result[win_dir.name] = maps
+    return result
+
+
+def sync_one(win_name: str, map_name: str) -> int:
+    """同步单个窗口+地图。"""
+    win_name = _safe(win_name)
+    map_name = _safe(map_name)
+    map_dir = TARGET_DIR / win_name / map_name
     map_dir.mkdir(parents=True, exist_ok=True)
+    src_base = MARKER_OUT / win_name
     synced = 0
 
-    map_cfg = maps_data.get(map_name, {})
+    # 1. maps.json → markers.json
+    maps_src = src_base / f"{map_name}_maps.json"
+    markers_dst = map_dir / "markers.json"
+    if maps_src.exists():
+        shutil.copy2(maps_src, markers_dst)
+        synced += 1
+        # 读取统计
+        try:
+            with open(maps_src, "r", encoding="utf-8") as f:
+                mc = json.load(f)
+            p = len(mc.get("platforms", [])); r = len(mc.get("ropes", []))
+            j = len(mc.get("jumps", [])); fl = len(mc.get("flash_points", []))
+            pr = len(mc.get("patrol_routes", []))
+            print(f"   ✓ markers.json (平台{p} 绳梯{r} 跳跃{j} 闪现{fl} 路线{pr})")
+        except Exception:
+            print(f"   ✓ markers.json")
+    else:
+        print(f"   ⚠ {map_name}_maps.json 不存在")
+        return synced
 
-    # 1. world_model.json（始终覆盖）
-    model_src = MARKER_OUT / f"{map_name}_model.json"
+    # 2. _model.json → world_model.json
+    model_src = src_base / f"{map_name}_model.json"
     model_dst = map_dir / "world_model.json"
     if model_src.exists():
         shutil.copy2(model_src, model_dst)
         synced += 1
         print(f"   ✓ world_model.json")
     else:
-        print(f"   ⚠ {map_name}_model.json 不存在，跳过")
+        print(f"   ⚠ {map_name}_model.json 不存在")
 
-    # 2. markers.json（始终从 maps.json 重建，patrol_routes 以源数据为准）
-    markers_dst = map_dir / "markers.json"
-    markers_data: dict = {map_name: {}}
-    for key in ("platforms", "ropes", "jumps", "flash_points", "patrol_routes",
-                 "mm_region", "minimap_size"):
-        if key in map_cfg:
-            markers_data[map_name][key] = map_cfg[key]
-
-    with open(markers_dst, "w", encoding="utf-8") as f:
-        json.dump(markers_data, f, ensure_ascii=False, indent=2)
-    synced += 1
-    print(f"   ✓ markers.json (平台{len(markers_data[map_name].get('platforms',[]))}"
-          f" 绳梯{len(markers_data[map_name].get('ropes',[]))}"
-          f" 跳跃{len(markers_data[map_name].get('jumps',[]))}"
-          f" 闪现{len(markers_data[map_name].get('flash_points',[]))}"
-          f" 路线{len(markers_data[map_name].get('patrol_routes',[]))})")
-
-    # 3. best.pt（始终覆盖）
+    # 3. best.pt
     pt_src = YOLO_MODELS / map_name / "best.pt"
     pt_dst = map_dir / "best.pt"
     if pt_src.exists():
@@ -79,41 +97,68 @@ def sync_map(map_name: str, maps_data: dict) -> int:
         synced += 1
         print(f"   ✓ best.pt")
     else:
-        print(f"   ⚠ best.pt 不存在: {pt_src}")
+        print(f"   - 无专属 best.pt")
 
-    # 4. config.json（只创建，不覆盖已有的）
+    # 4. config.json（只创建，不覆盖）
     config_dst = map_dir / "config.json"
     if not config_dst.exists():
-        mm_region = map_cfg.get("mm_region", [])
-        config = {"template_rect": [85, 728, 150, 745], "mm_region": mm_region}
+        try:
+            with open(maps_src, "r", encoding="utf-8") as f:
+                mc = json.load(f)
+            mm_region = mc.get("mm_region", [])
+        except Exception:
+            mm_region = []
         with open(config_dst, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+            json.dump({"mm_region": mm_region}, f, ensure_ascii=False, indent=2)
         synced += 1
-        print(f"   ✓ config.json (新建，请手动确认 template_rect)")
+        print(f"   ✓ config.json (新建)")
     else:
-        print(f"   - config.json (已存在，跳过)")
+        print(f"   - config.json (已存在)")
 
     return synced
 
 
 def main():
-    maps_data = load_maps_json()
-    if not maps_data:
-        print("无法加载 maps.json，退出。")
+    all_data = discover_window_maps()
+    if not all_data:
+        print("未找到任何地图数据")
         return
 
-    if len(sys.argv) >= 2:
-        map_names = [sys.argv[1]]
-    else:
-        map_names = list(maps_data.keys())
+    args = sys.argv[1:]
 
-    total = 0
-    for name in map_names:
-        if name not in maps_data:
-            print(f"[{name}] 不在 maps.json 中，跳过")
-            continue
-        print(f"\n[{name}]")
-        total += sync_map(name, maps_data)
+    if len(args) >= 2:
+        # 指定窗口+地图
+        win_name, map_name = args[0], args[1]
+        if win_name not in all_data or map_name not in all_data[win_name]:
+            print(f"未找到 {win_name}/{map_name}")
+            return
+        print(f"[{win_name}/{map_name}]")
+        total = sync_one(win_name, map_name)
+    elif len(args) == 1:
+        # 指定窗口
+        win_name = args[0]
+        if win_name not in all_data:
+            print(f"未找到窗口: {win_name}")
+            return
+        total = 0
+        for map_name in all_data[win_name]:
+            print(f"[{win_name}/{map_name}]")
+            total += sync_one(win_name, map_name)
+    else:
+        # 全部同步
+        total = 0
+        for win_name in sorted(all_data.keys()):
+            for map_name in all_data[win_name]:
+                print(f"[{win_name}/{map_name}]")
+                total += sync_one(win_name, map_name)
+
+    # 同步全局 system_setting.json
+    ss_src = MARKER_OUT / "system_setting.json"
+    ss_dst = TARGET_DIR / "system_setting.json"
+    if ss_src.exists():
+        shutil.copy2(ss_src, ss_dst)
+        total += 1
+        print(f"\n[全局] ✓ system_setting.json")
 
     print(f"\n完成！共同步 {total} 个文件。")
 

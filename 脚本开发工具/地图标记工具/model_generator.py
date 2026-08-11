@@ -3,13 +3,14 @@
 根据已标记的平台/绳梯/跳跃/闪现点生成世界模型。"""
 
 import json, os, tkinter as tk
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 try:
-    from .config import MAPS_FILE, OUTPUT_DIR
+    from .config import get_map_path, get_model_path
 except ImportError:
-    from config import MAPS_FILE, OUTPUT_DIR  # type: ignore[no-redef]
+    from config import get_map_path, get_model_path  # type: ignore[no-redef]
 
 
 def open_model_generator(app) -> None:
@@ -17,9 +18,11 @@ def open_model_generator(app) -> None:
     if app.running: app.status_text.set("标记运行中，请先停止"); return
     map_name: str = app.map_name_var.get().strip()
     if not map_name: app.status_text.set("请先输入地图名称"); return
-    if not MAPS_FILE.exists(): app.status_text.set("maps.json 不存在"); return
-    with open(MAPS_FILE, "r", encoding="utf-8") as f: data: dict = json.load(f)
-    map_cfg: dict = data.get(map_name, {})
+    win_name: str = app._window_var.get().strip()
+    if not win_name: app.status_text.set("请先选择游戏窗口"); return
+    map_path = get_map_path(win_name, map_name)
+    if not map_path.exists(): app.status_text.set(f"{map_path.name} 不存在"); return
+    with open(map_path, "r", encoding="utf-8") as f: map_cfg: dict = json.load(f)
     platforms_raw: list = map_cfg.get("platforms", [])
     ropes: list = map_cfg.get("ropes", [])
     jumps: list = map_cfg.get("jumps", [])
@@ -209,7 +212,8 @@ def open_model_generator(app) -> None:
     def _save() -> None:
         output = {"map_name": map_name, "minimap_size": list(app.mm_size),
                   "mm_region": list(app.mm_offsets), "platforms": platforms, "edges": edir}
-        out_path = os.path.join(OUTPUT_DIR, f"{map_name}_model.json")
+        out_path = str(get_model_path(win_name, map_name))
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
         app.status_text.set(f"模型已保存: {out_path}")

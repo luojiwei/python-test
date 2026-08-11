@@ -16,7 +16,7 @@ from perception import GameState
 # 参数配置
 # ============================================================
 
-ATTACK_TAP_MS: float = 0.03      # 攻击键轻触时长
+ATTACK_TAP_MS: float = 0.10      # 攻击键轻触时长
 TURN_TAP_MS: float = 0.03        # 转向轻触时长
 SKILL_PRE_DELAY: float = 0.15    # 技能释放前停键等待
 SKILL_TAP_MS: float = 0.05       # 技能键轻触时长
@@ -134,6 +134,15 @@ class KeyActionManager:
         """轻触技能键（默认 Ctrl 兼容旧逻辑）。"""
         self.keys.tap(key, duration=ATTACK_TAP_MS)
         self._throttled_log(f"攻击键 [{key}]")
+
+    # ---- 下跳 ----
+
+    def hold_jump_down(self) -> None:
+        """按住 ↓，点一下 Alt，释放 ↓。"""
+        self.keys.press('d')               # 按住 ↓
+        time.sleep(0.05)
+        self.keys.tap('j', duration=0.08)  # 点一下 Alt
+        self.keys.release('d')             # 释放 ↓
 
     # ---- 技能 ----
 

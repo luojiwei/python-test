@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                 QLabel, QLineEdit, QComboBox, QGroupBox,
-                                QPlainTextEdit, QMessageBox,
+                                QPlainTextEdit, QMessageBox, QDialog,
                                 QTextEdit)
 from PySide6.QtCore import Qt, Signal, QObject
 
@@ -192,7 +192,7 @@ class YOLOTab(QObject):
         row2.addWidget(QLabel("类别名(每行一个):"))
         self._yolo_classes_text = QTextEdit()
         self._yolo_classes_text.setMaximumHeight(80)
-        self._yolo_classes_text.setPlainText("怪物\n绳子上\n绳子下\n梯子上\n梯子下")
+        self._yolo_classes_text.setPlainText("怪物\n绳子上\n绳子下\n梯子上\n梯子下\n玩家\n宠物")
         row2.addWidget(self._yolo_classes_text)
         layout.addLayout(row2)
 
@@ -423,9 +423,9 @@ names:"""
             return
         data = json.loads(METRICS_FILE.read_text(encoding="utf-8"))
         versions = sorted(data.keys(), key=lambda v: int(v[1:]))
-        mAPs = [data[v]["map50"] * 100 for v in versions]
-        precs = [data[v].get("precision", 0) * 100 for v in versions]
-        recalls = [data[v].get("recall", 0) * 100 for v in versions]
+        mAPs = [data[v]["map50"] for v in versions]
+        precs = [data[v].get("precision", 0) for v in versions]
+        recalls = [data[v].get("recall", 0) for v in versions]
         counts = [data[v]["images"] for v in versions]
 
         img_path = Path(tempfile.gettempdir()) / "yolo_train_stats.png"
@@ -462,10 +462,10 @@ for i, c in enumerate(counts): ax3.text(i, c + 10, str(c), ha='center', fontsize
 lines = []
 for v in versions:
     d = data[v]
-    lines.append('%s: mAP=%.1f%% P=%.1f%% R=%.1f%% (%d张)' % (v, d['map50']*100, d.get('precision',0)*100, d.get('recall',0)*100, d['images']))
+    lines.append('%s: mAP=%.1f%% P=%.1f%% R=%.1f%% (%d张)' % (v, d['map50'], d.get('precision',0)*100, d.get('recall',0)*100, d['images']))
 ax4.axis('off'); ax4.text(0.05, 0.95, chr(10).join(lines), transform=ax4.transAxes, fontsize=10, verticalalignment='top', fontfamily='monospace')
 plt.tight_layout()
-plt.savefig(r'""" + str(img_path.resolve()) + """', dpi=100)
+plt.savefig(""" + repr(str(img_path.resolve())) + """, dpi=100)
 print('OK')
 """), encoding="utf-8")
 

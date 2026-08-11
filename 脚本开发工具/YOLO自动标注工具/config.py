@@ -72,7 +72,7 @@ CONFIG_FILE = PROJECT_DIR / "config_cache.json"
 # ============================================================
 # 截图参数
 # ============================================================
-WINDOW_TITLE: str = "WingsMs"
+WINDOW_TITLE: str = "冒险岛怀旧服"
 TARGET_W: int = 1280
 TARGET_H: int = 720
 IMAGE_FORMAT: str = "PNG"
@@ -94,19 +94,10 @@ PYTHON_BIN = Path(
 # ============================================================
 # 外部依赖 — 延迟导入
 # ============================================================
-mss = None
 Image = None
 
 def ensure_screenshot_libs() -> bool:
-    global mss, Image
-    if mss is None:
-        try:
-            import mss as _mss
-            mss = _mss
-        except ImportError:
-            from tkinter import messagebox
-            messagebox.showerror("缺少依赖", "请先安装 mss:\npip install mss")
-            return False
+    global Image
     if Image is None:
         try:
             from PIL import Image as _Image

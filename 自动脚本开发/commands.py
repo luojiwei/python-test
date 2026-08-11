@@ -327,23 +327,20 @@ class HoldDirCommand(Command):
 
 
 class JumpDownCommand(Command):
-    """下跳命令：Alt+↓ 从平台跳下。
-
-    固定路线回归方式「下跳」专用，按住 Alt+↓ 短暂时间后释放。
+    """下跳命令：按住 Alt，轻触 ↓ 一次。
+    固定路线回归方式「下跳」专用。
     """
-    JUMP_DOWN_DURATION: float = 0.5
-
     def __init__(self) -> None:
         self._start_time: float = time.time()
+        self._done: bool = False
 
     def execute_tick(self, actions: KeyActionManager, state: GameState, wm: WorldModel) -> None:
-        if time.time() - self._start_time < self.JUMP_DOWN_DURATION:
-            actions.hold('j', 'd')
-        else:
-            actions.release_all()
+        if not self._done:
+            actions.hold_jump_down()
+            self._done = True
 
     def is_finished(self) -> bool:
-        return time.time() - self._start_time > self.JUMP_DOWN_DURATION
+        return self._done
 
     def is_transition(self) -> bool:
         return True

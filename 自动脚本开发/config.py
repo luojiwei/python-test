@@ -10,7 +10,7 @@ import numpy as np
 
 PROJECT_DIR: Path = Path(__file__).resolve().parent
 OUTPUT_DIR: Path = PROJECT_DIR / "track_output"
-WINDOW_TITLE: str = "WingsMs"
+WINDOW_TITLE: str = "冒险岛怀旧服"
 
 # ============================================================
 # 频率 & 时间
@@ -164,20 +164,40 @@ NON_MONSTER_NAMES: set[str] = {"绳子上", "绳子下", "梯子上", "梯子下
 # ============================================================
 
 def discover_maps() -> list[str]:
-    """扫描 maps/ 目录，返回所有有 config.json 的地图名"""
+    """扫描 maps/*/ 子目录，返回所有有 config.json 的地图名（跨窗口）"""
     maps_dir = PROJECT_DIR / "maps"
     if not maps_dir.is_dir():
         return []
     result = []
-    for d in sorted(maps_dir.iterdir()):
-        if d.is_dir() and (d / "config.json").exists():
-            result.append(d.name)
+    for win_dir in sorted(maps_dir.iterdir()):
+        if not win_dir.is_dir() or win_dir.name.startswith("."):
+            continue
+        if win_dir.name == "system_setting.json" or win_dir.suffix == ".pt":
+            continue
+        for map_dir in sorted(win_dir.iterdir()):
+            if map_dir.is_dir() and (map_dir / "config.json").exists():
+                result.append(map_dir.name)
     return result
 
 
 def validate_map_resources(map_name: str) -> list[str]:
-    """验证地图资源完整性，返回缺失文件列表"""
-    map_dir = PROJECT_DIR / "maps" / map_name
-    required = ["config.json", "world_model.json", "best.pt"]
+    """验证地图资源完整性，返回缺失文件列表。map_name 可以是 'map' 或 'window/map'。"""
+    if "/" in map_name:
+        parts = map_name.split("/", 1)
+        map_dir = PROJECT_DIR / "maps" / parts[0] / parts[1]
+    else:
+        # 自动查找第一个匹配的窗口目录
+        maps_dir = PROJECT_DIR / "maps"
+        map_dir = None
+        for win_dir in sorted(maps_dir.iterdir()):
+            if win_dir.is_dir() and not win_dir.name.startswith("."):
+                candidate = win_dir / map_name
+                if candidate.is_dir() and (candidate / "config.json").exists():
+                    map_dir = candidate
+                    break
+        if map_dir is None:
+            map_dir = maps_dir / map_name
+
+    required = ["config.json", "world_model.json"]
     missing = [f for f in required if not (map_dir / f).exists()]
     return missing

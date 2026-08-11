@@ -3,11 +3,23 @@
 ## 通用开发规范
 - 未明确要求时，不要做兼容处理。以自动脚本代码为标准，统一风格，不要预留中英文双值、多格式兜底等兼容逻辑。
 - 不要主动操作 git（add/commit/push 等），除非用户明确要求。
-- 截图（游戏窗口）时，先 BringToFront 提到最前，截完立刻放到最后面（不挡其他窗口）。
+- 截图（游戏窗口）时，先 BringToFront 提到最前，截完立刻放到最后面（不挡其他窗口）。截图顺序：前置顶 → 截全帧 → 截所有子区域 → 后置底 → 分析（截完后窗口立刻让位）。
 - 截图和临时文件不要主动删除，除非用户明确要求。
 - 分析问题时要同时看决策日志和运行日志，不要只看决策日志。
 - 修改代码前先分析清楚直接原因，不要凭推测改，改完要用日志验证。
 - 每次修改代码后必须清理 `__pycache__/` 目录。
+
+## OpenCV 5.x 中文路径问题
+- `cv2.imwrite("含中文路径/...", img)` 会静默返回 False。
+- 兜底: `cv2.imencode(".png", img)` + `Path.write_bytes(buf.tobytes())`。
+
+## 截图首选 PrintWindow（不被遮挡）
+- 用 `ctypes` 调用 `user32.GetDC` + `gdi32.CreateCompatibleDC/Bitmap` + `user32.PrintWindow(hwnd, dc, 1)` 可后台截取目标窗口内容。
+- `mss.grab()` 按屏幕坐标抓取，会被其他窗口遮挡（WorkBuddy 容易盖住游戏）。开发/测试脚本**优先用 PrintWindow**。
+- 实现见 `自动脚本开发/input_utils.py:_capture_window()`。
+- 注意: `ctypes.wintypes` 没有 `BITMAPINFO` 类，需自己 `ctypes.Structure` 定义 `BITMAPINFOHEADER`。
+- PW_CLIENTONLY=1 截取客户端区域（不含标题栏），**窗口尺寸必须用 GetClientRect，不能用 GetWindowRect**。
+- **DPI 感知**: PrintWindow 截图必须用 `_dpi_unaware()` 上下文临时把线程切到 DPI_UNAWARE，否则 DPI-aware 线程（如 Qt）下 GetClientRect 返回物理像素但 PrintWindow 按逻辑像素绘制，只有左上角有内容。三个工具均需遵守：`自动脚本开发/input_utils.py`、`脚本开发工具/地图标记工具/window_utils.py`、`脚本开发工具/YOLO自动标注工具/utils.py`。
 
 ## 文件与路径
 - 使用 Python 3.13 运行脚本：`C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\python.exe`
@@ -41,6 +53,14 @@
 - 地图数据存于 `脚本开发工具/地图标记工具/marker_output/maps.json`。
 - 世界模型存于 `脚本开发工具/地图标记工具/marker_output/{地图名}_model.json`。
 - 编辑地图数据后在标记工具中重新生成模型，然后运行 `maps同步.bat` 同步到自动脚本。
+
+## system_setting.json（按窗口名全局配置）
+文件: `脚本开发工具/地图标记工具/marker_output/system_setting.json`
+结构: `{窗口名: {template_rect, window_size, dot_hsv_lower, dot_hsv_upper}}`
+- `template_rect`: 角色名区域 [x1,y1,x2,y2]
+- `window_size`: 游戏窗口 [w, h]
+- `dot_hsv_lower` / `dot_hsv_upper`: 小地图黄点 HSV 检测阈值（不同游戏版本颜色饱和度差异很大，需逐游戏调）
+- 同步至 `自动脚本开发/maps/system_setting.json`
 
 ## 自动脚本
 - 启动时通过 `_detect_start_waypoint()` 自动匹配角色最近途经点，跳过已走过的。

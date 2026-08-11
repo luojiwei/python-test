@@ -6,5 +6,13 @@
     "recall": 0.885,
     "images": 312,
     "epochs": 100
+  },
+  "v3": {
+    "version": "v3",
+    "map50": 50.0,
+    "precision": 0.9191,
+    "recall": 0.8255,
+    "images": 125,
+    "epochs": 100
   }
 }

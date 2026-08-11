@@ -8,10 +8,10 @@ import tkinter as tk
 from PIL import Image, ImageTk
 
 try:
-    from .config import MAPS_FILE
+    from .config import get_map_path
     from .drawing import draw_markers_overview
 except ImportError:
-    from config import MAPS_FILE  # type: ignore[no-redef]
+    from config import get_map_path  # type: ignore[no-redef]
     from drawing import draw_markers_overview  # type: ignore[no-redef]
 
 
@@ -20,12 +20,14 @@ def open_viewer(app) -> None:
     if app.running: app.status_text.set("标记运行中，请先停止"); return
     map_name: str = app.map_name_var.get().strip()
     if not map_name: app.status_text.set("请先输入地图名称"); return
+    win_name: str = app._window_var.get().strip()
+    if not win_name: app.status_text.set("请先选择游戏窗口"); return
     platforms: list = []; ropes: list = []; jumps: list = []; flashes: list = []
     map_cfg: dict = {}
-    if MAPS_FILE.exists():
-        with open(MAPS_FILE, "r", encoding="utf-8") as f:
-            data: dict = json.load(f)
-        map_cfg = data.get(map_name, {})
+    map_path = get_map_path(win_name, map_name)
+    if map_path.exists():
+        with open(map_path, "r", encoding="utf-8") as f:
+            map_cfg = json.load(f)
         platforms = map_cfg.get("platforms", [])
         ropes = map_cfg.get("ropes", [])
         jumps = map_cfg.get("jumps", [])

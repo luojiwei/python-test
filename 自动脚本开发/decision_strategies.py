@@ -459,10 +459,12 @@ class FixedRouteStrategy(DecisionStrategy):
 
         # 查找直达边
         exit_edge = None
-        for e in wm.edges:
-            if e.get("from_platform") == current_platform and e.get("to_platform") == wp_platform:
-                exit_edge = e
-                break
+        # 下跳方式不查找绳梯边，直接跳下
+        if return_method != "下跳":
+            for e in wm.edges:
+                if e.get("from_platform") == current_platform and e.get("to_platform") == wp_platform:
+                    exit_edge = e
+                    break
 
         if exit_edge is None:
             curr_order = wm._platform_order(current_platform)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                 QLabel, QLineEdit, QGroupBox, QListWidget,
-                                QDialog, QDialogButtonBox, QSizePolicy)
+                                QDialog, QDialogButtonBox)
 from PySide6.QtCore import Qt, Signal, QObject
 
 import config
@@ -32,15 +32,12 @@ class ScreenshotTab(QObject):
         layout.setContentsMargins(12, 8, 12, 8)
         layout.setSpacing(6)
 
-        # 窗口选择
+        # 窗口
         row = QHBoxLayout()
         row.addWidget(QLabel("目标窗口:"))
         self._window_var = QLineEdit(WINDOW_TITLE)
         self._window_var.setMinimumWidth(180)
         row.addWidget(self._window_var)
-        btn_pick = QPushButton("选择窗口")
-        btn_pick.clicked.connect(self._pick_window)
-        row.addWidget(btn_pick)
         btn_browse = QPushButton("浏览窗口")
         btn_browse.clicked.connect(self._browse_windows)
         row.addWidget(btn_browse)
@@ -103,23 +100,6 @@ class ScreenshotTab(QObject):
     # ============================================================
     # 窗口选择
     # ============================================================
-    def _pick_window(self) -> None:
-        title = self._window_var.text().strip()
-        if not title:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self.app, "提示", "请先输入窗口标题关键词")
-            return
-        windows = find_window_by_title(title)
-        if not windows:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self.app, "提示", f"未找到包含 '{title}' 的窗口")
-            return
-        if len(windows) == 1:
-            self.app._target_hwnd = windows[0][0]
-            self._window_var.setText(windows[0][1])
-            return
-        self._show_window_picker(windows)
-
     def _browse_windows(self) -> None:
         windows = enum_visible_windows(200, 200)
         if not windows:
@@ -127,29 +107,6 @@ class ScreenshotTab(QObject):
             QMessageBox.information(self.app, "提示", "未找到可用窗口")
             return
         self._show_window_browser(windows)
-
-    def _show_window_picker(self, windows: list) -> None:
-        dlg = QDialog(self.app)
-        dlg.setWindowTitle("选择窗口")
-        dlg.resize(600, 280)
-        layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel(f"找到 {len(windows)} 个窗口，请选择:"))
-
-        lb = QListWidget()
-        for i, (_, wt, l, t, r, b, pid) in enumerate(windows):
-            lb.addItem(f"  [{i}] {wt[:50]:<52}  {r-l}x{b-t:<10}  PID={pid}")
-        lb.setCurrentRow(0)
-        layout.addWidget(lb)
-
-        btns = QDialogButtonBox(QDialogButtonBox.Ok)
-        btns.accepted.connect(dlg.accept)
-        layout.addWidget(btns)
-
-        if dlg.exec() == QDialog.Accepted:
-            sel = lb.currentRow()
-            if sel >= 0:
-                self.app._target_hwnd = windows[sel][0]
-                self._window_var.setText(windows[sel][1])
 
     def _show_window_browser(self, windows: list) -> None:
         dlg = QDialog(self.app)
@@ -238,29 +195,28 @@ class ScreenshotTab(QObject):
         self._screenshot_status.setText(f"已停止  共截 {self.app._processed_count} 张")
 
     def _screenshot_loop(self, out_dir: Path, map_name: str, interval: float) -> None:
-        with config.mss.mss() as sct:
-            last_status = time.time()
-            while self.app._screenshot_running:
-                t0 = time.time()
-                try:
-                    fname = capture_and_save(sct, self.app._target_hwnd, out_dir, map_name)
-                    if fname:
-                        self.app._processed_count += 1
-                except Exception as e:
-                    import traceback
-                    print(f"[截图异常] {e}", flush=True)
-                    traceback.print_exc()
-                    self.status_signal.emit(f"异常: {e}")
-                    break
+        last_status = time.time()
+        while self.app._screenshot_running:
+            t0 = time.time()
+            try:
+                fname = capture_and_save(self.app._target_hwnd, out_dir, map_name)
+                if fname:
+                    self.app._processed_count += 1
+            except Exception as e:
+                import traceback
+                print(f"[截图异常] {e}", flush=True)
+                traceback.print_exc()
+                self.status_signal.emit(f"异常: {e}")
+                break
 
-                if time.time() - last_status > 0.5:
-                    self.status_signal.emit(
-                        f"运行中... {self.app._processed_count} 张")
-                    last_status = time.time()
+            if time.time() - last_status > 0.5:
+                self.status_signal.emit(
+                    f"运行中... {self.app._processed_count} 张")
+                last_status = time.time()
 
-                sleep_t = interval - (time.time() - t0)
-                if sleep_t > 0:
-                    time.sleep(sleep_t)
+            sleep_t = interval - (time.time() - t0)
+            if sleep_t > 0:
+                time.sleep(sleep_t)
 
     # ============================================================
     # 统计

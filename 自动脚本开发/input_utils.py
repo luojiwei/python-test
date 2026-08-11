@@ -9,6 +9,78 @@ import numpy as np
 
 from config import KEY_MAP
 
+# ---- PrintWindow 截取结构体 ----
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.c_uint32),
+        ("biWidth", ctypes.c_int32),
+        ("biHeight", ctypes.c_int32),
+        ("biPlanes", ctypes.c_uint16),
+        ("biBitCount", ctypes.c_uint16),
+        ("biCompression", ctypes.c_uint32),
+        ("biSizeImage", ctypes.c_uint32),
+        ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32),
+        ("biClrUsed", ctypes.c_uint32),
+        ("biClrImportant", ctypes.c_uint32),
+    ]
+
+# ---- DPI awareness 上下文切换 ----
+_DPI_AWARENESS_CONTEXT_UNAWARE = ctypes.c_void_p(-1)
+
+class _dpi_unaware:
+    """临时把当前线程 DPI awareness 切到 UNAWARE。"""
+    def __enter__(self):
+        try:
+            self._prev = ctypes.windll.user32.SetThreadDpiAwarenessContext(_DPI_AWARENESS_CONTEXT_UNAWARE)
+        except Exception:
+            self._prev = None
+        return self
+    def __exit__(self, *a):
+        try:
+            if self._prev:
+                ctypes.windll.user32.SetThreadDpiAwarenessContext(self._prev)
+        except Exception:
+            pass
+
+
+def _capture_window(hwnd: int) -> np.ndarray | None:
+    """用 PrintWindow 直接截取窗口客户区（不被其他窗口遮挡）。
+
+    DPI-aware 线程下 GetClientRect 返回物理像素但 PrintWindow 按逻辑像素绘制，
+    用 _dpi_unaware 上下文确保 bitmap 和 PrintWindow 都按 1:1 逻辑像素对齐。
+    """
+    with _dpi_unaware():
+        r = ctypes.wintypes.RECT()
+        ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(r))
+        w, h = r.right, r.bottom
+        if w <= 0 or h <= 0:
+            return None
+        hdc = ctypes.windll.user32.GetDC(hwnd)
+        if not hdc:
+            return None
+        try:
+            memdc = ctypes.windll.gdi32.CreateCompatibleDC(hdc)
+            bmp = ctypes.windll.gdi32.CreateCompatibleBitmap(hdc, w, h)
+            old = ctypes.windll.gdi32.SelectObject(memdc, bmp)
+            if not ctypes.windll.user32.PrintWindow(hwnd, memdc, 1):
+                ctypes.windll.user32.PrintWindow(hwnd, memdc, 0)
+            bi = ctypes.create_string_buffer(4 * w * h)
+            bmi = _BITMAPINFOHEADER()
+            bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+            bmi.biWidth, bmi.biHeight = w, -h
+            bmi.biPlanes, bmi.biBitCount = 1, 32
+            bmi.biSizeImage = 4 * w * h
+            ctypes.windll.gdi32.GetDIBits(memdc, bmp, 0, h, bi, ctypes.byref(bmi), 0)
+            img = np.frombuffer(bi, dtype=np.uint8).reshape(h, w, 4)[:, :, :3].copy()
+            ctypes.windll.gdi32.SelectObject(memdc, old)
+            ctypes.windll.gdi32.DeleteObject(bmp)
+            ctypes.windll.gdi32.DeleteDC(memdc)
+        finally:
+            ctypes.windll.user32.ReleaseDC(hwnd, hdc)
+    return img
+
 # ============================================================
 # 按键控制
 # ============================================================
@@ -31,8 +103,12 @@ class KeySender:
 
     def _kb(self, key: str, down: bool) -> None:
         vk, sc = KEY_MAP[key]
-        ext = 0x0001  # KEYEVENTF_EXTENDEDKEY（非扩展键无害，扩展键必须）
-        ctypes.windll.user32.keybd_event(vk, sc, ext if down else ext | 0x0002, 0)
+        # 方向键/Alt/Ctrl 需要 EXTENDEDKEY 标志，字母数字不需要
+        extended = key in ('l', 'r', 'u', 'd', 'j', 'a')
+        flags = 0x0001 if (extended and down) else 0
+        if not down:
+            flags |= 0x0002  # KEYEVENTF_KEYUP
+        ctypes.windll.user32.keybd_event(vk, sc, flags, 0)
 
     def press(self, key: str) -> None:
         if key not in self._held:
@@ -123,35 +199,20 @@ def force_foreground(hwnd: int) -> None:
 
 
 def capture_frame(hwnd: int) -> np.ndarray | None:
-    try:
-        r = ctypes.wintypes.RECT()
-        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r))
-        gl, gt, gr, gb = r.left, r.top, r.right, r.bottom
-        if gr <= gl or gb <= gt:
-            return None
-        region = {"left": max(0, gl), "top": max(0, gt),
-                  "width": gr - gl, "height": gb - gt}
-        with mss.mss() as sct:
-            img_raw = sct.grab(region)
-        return np.array(img_raw)[:, :, :3]
-    except Exception:
-        return None
+    """截取游戏窗口全帧（PrintWindow，不被遮挡）。"""
+    return _capture_window(hwnd)
 
 
 def capture_minimap(hwnd: int, mm_region: tuple[int, ...]) -> np.ndarray | None:
-    try:
-        r = ctypes.wintypes.RECT()
-        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(r))
-        gl, gt = r.left, r.top
-        ml, mt, mr, mb = mm_region
-        mw, mh = mr - ml, mb - mt
-        if mw <= 0 or mh <= 0:
-            return None
-        region = {"left": gl + ml, "top": gt + mt, "width": mw, "height": mh}
-        with mss.mss() as sct:
-            return np.array(sct.grab(region))[:, :, :3]
-    except Exception:
+    """截取小地图区域（从 PrintWindow 全帧中切片）。"""
+    frame = _capture_window(hwnd)
+    if frame is None:
         return None
+    ml, mt, mr, mb = mm_region
+    fh, fw = frame.shape[:2]
+    if mr > fw or mb > fh or ml < 0 or mt < 0 or mr <= ml or mb <= mt:
+        return None
+    return frame[mt:mb, ml:mr].copy()
 
 
 def enum_visible_windows() -> list[tuple[int, str]]:

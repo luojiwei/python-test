@@ -11,8 +11,8 @@ from PySide6.QtCore import Qt, QRectF, QPointF
 
 from config import load_reviewed_stems
 
-CLASS_NAMES: dict[int, str] = {0: "怪物", 1: "绳子上", 2: "绳子下", 3: "梯子上", 4: "梯子下"}
-CLASS_COLORS: list[str] = ["#00DD00", "#FF4444", "#FF8800", "#4488FF", "#AA00EE"]
+CLASS_NAMES: dict[int, str] = {0: "怪物", 1: "绳子上", 2: "绳子下", 3: "梯子上", 4: "梯子下", 5: "玩家", 6: "宠物"}
+CLASS_COLORS: list[str] = ["#00DD00", "#FF4444", "#FF8800", "#4488FF", "#AA00EE", "#00CCCC", "#FF66AA"]
 
 
 class ImageCanvas(QLabel):
@@ -211,7 +211,7 @@ class ReviewDialog(QDialog):
             # 只拦截快捷键，放过普通字符输入
             is_shortcut = (
                 Qt.Key_Left <= key <= Qt.Key_Down  # 方向键
-                or Qt.Key_1 <= key <= Qt.Key_5     # 数字改类别
+                or Qt.Key_1 <= key <= Qt.Key_7     # 数字改类别
                 or key in (Qt.Key_A, Qt.Key_D, Qt.Key_Escape)  # 通过/删除/关闭
                 or (key == Qt.Key_S and event.modifiers() == Qt.ControlModifier)
             )
@@ -585,8 +585,8 @@ class ReviewDialog(QDialog):
             self._status_var.setText(
                 f"文件: {self._filtered_images[self._current_idx].name}  |  "
                 f"框数: {len(self._canvas.get_boxes())}  [已保存]")
-        elif Qt.Key_1 <= event.key() <= Qt.Key_5:
-            # 数字键 1-5 快速设置选中框类别
+        elif Qt.Key_1 <= event.key() <= Qt.Key_7:
+            # 数字键 1-7 快速设置选中框类别
             cls_id = event.key() - Qt.Key_1
             self._quick_set_class(cls_id)
         elif event.key() == Qt.Key_A:

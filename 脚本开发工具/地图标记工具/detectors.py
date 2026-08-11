@@ -57,12 +57,12 @@ class RopeDetector:
     """
 
     def __init__(self, buffer_size: int = 10, stable_threshold: int = 2,
-                 big_drop_ratio: float = 2.0, y_offset: int = 3):
+                 big_drop_ratio: float = 2.0, y_offset: int = 0):
         self.buffer: list = []             # sliding window of (x,y)
         self.buffer_size: int = buffer_size
         self.stable_threshold: int = stable_threshold
         self.big_drop_ratio: float = big_drop_ratio
-        self.y_offset: int = y_offset      # px, shift y down to match real rope position
+        self.y_offset: int = y_offset
         self.ropes: list = []              # completed: [(tx,ty,bx,by), ...]
         self._pending_top = None           # (x,y) waiting for a matching bottom
 
@@ -146,7 +146,7 @@ class JumpDetector:
 
     def __init__(self, buffer_size: int = 10, stable_threshold: int = 2,
                  jump_threshold: int = 3, cooldown_frames: int = 15,
-                 y_offset: int = 3):
+                 y_offset: int = 0):
         self.buffer: list = []                 # sliding window
         self.buffer_size: int = buffer_size
         self.stable_threshold: int = stable_threshold
@@ -221,7 +221,7 @@ class FlashDetector:
     """
 
     def __init__(self, flash_threshold: int = 10, cooldown_frames: int = 20,
-                 y_offset: int = 3):
+                 y_offset: int = 0):
         self.flash_threshold: int = flash_threshold
         self.cooldown_frames: int = cooldown_frames
         self.y_offset: int = y_offset

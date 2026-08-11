@@ -8,15 +8,17 @@ import numpy as np
 from PIL import Image, ImageTk
 
 try:
-    from .config import CAPTURE_FPS, MAPS_FILE, OUTPUT_DIR
+    from .config import CAPTURE_FPS, get_map_path, OUTPUT_DIR
     from .drawing import draw_platform_preview
     from .player_detection import detect_player_dot
     from .rdp_simplify import rdp_simplify
+    from ..window_utils import capture_client
 except ImportError:
-    from config import CAPTURE_FPS, MAPS_FILE, OUTPUT_DIR  # type: ignore[no-redef]
+    from config import CAPTURE_FPS, get_map_path, OUTPUT_DIR  # type: ignore[no-redef]
     from drawing import draw_platform_preview  # type: ignore[no-redef]
     from player_detection import detect_player_dot  # type: ignore[no-redef]
     from rdp_simplify import rdp_simplify  # type: ignore[no-redef]
+    from window_utils import capture_client  # type: ignore[no-redef]
 
 
 class PlatformMixin:
@@ -84,8 +86,6 @@ class PlatformMixin:
             btn.config(text="平台标记", bg="#9b59b6", activebackground="#8e44ad")
 
     def _loop_platform(self, map_name):
-        import ctypes
-        sct = mss.MSS()
         interval = 1.0 / CAPTURE_FPS
         debug_frame_saved = False
         last_status = time.time()
@@ -93,27 +93,22 @@ class PlatformMixin:
         while self.running:
             t0 = time.time()
             try:
-                r = ctypes.wintypes.RECT()
-                ctypes.windll.user32.GetWindowRect(self.target_hwnd, ctypes.byref(r))
-                gl, gt, gr, gb = r.left, r.top, r.right, r.bottom
-                if gr <= gl or gb <= gt:
-                    time.sleep(0.1)
-                    continue
-
                 ml, mt, mr, mb = self.mm_offsets
-                ml_abs = gl + ml
-                mt_abs = gt + mt
                 mw = mr - ml
                 mh = mb - mt
-
                 if mw <= 0 or mh <= 0:
                     time.sleep(0.1)
                     continue
 
-                region = {"left": ml_abs, "top": mt_abs,
-                          "width": mw, "height": mh}
-                img_raw = sct.grab(region)
-                mm = np.array(img_raw)[:, :, :3]
+                frame = capture_client(self.target_hwnd)
+                if frame is None:
+                    time.sleep(0.1)
+                    continue
+                fh, fw = frame.shape[:2]
+                if mr > fw or mb > fh:
+                    time.sleep(0.1)
+                    continue
+                mm = frame[mt:mb, ml:mr]
 
                 if not debug_frame_saved:
                     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -166,10 +161,11 @@ class PlatformMixin:
             return
 
         existing_platforms = []
-        if MAPS_FILE.exists():
-            with open(MAPS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            existing_platforms = data.get(map_name, {}).get("platforms", [])
+        win_name = self._window_var.get().strip()
+        map_path = get_map_path(win_name, map_name)
+        if map_path.exists():
+            with open(map_path, "r", encoding="utf-8") as f:
+                existing_platforms = json.load(f).get("platforms", [])
 
         sw, sh = self.mm_size
         scale = min(6.0, 700 / max(sw, sh, 1))
@@ -377,7 +373,7 @@ class PlatformMixin:
         self.root.wait_window(review_win)
 
     def _compute_platform_data(self, all_points):
-        adjusted = [(x, y + self.PLATFORM_Y_OFFSET) for x, y in all_points]
+        adjusted = [(x, y) for x, y in all_points]
         adjusted.sort(key=lambda p: p[0])
 
         simplified = rdp_simplify(adjusted, epsilon=self.PLATFORM_RDP_EPSILON)
@@ -410,28 +406,27 @@ class PlatformMixin:
         if not map_name or not platforms:
             self.status_text.set("无数据, 跳过保存")
             return
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        win_name = self._window_var.get().strip()
+        map_path = get_map_path(win_name, map_name)
+        map_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if MAPS_FILE.exists():
-            with open(MAPS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        else:
-            data = {}
+        existing = {}
+        if map_path.exists():
+            with open(map_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
 
-        existing = data.get(map_name, {})
         existing["platforms"] = platforms
         existing["minimap_size"] = list(self.mm_size)
         existing["mm_region"] = list(self.mm_offsets)
         if "ropes" not in existing: existing["ropes"] = []
         if "jumps" not in existing: existing["jumps"] = []
         if "flash_points" not in existing: existing["flash_points"] = []
-        data[map_name] = existing
 
-        with open(MAPS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        with open(map_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
 
         self.status_text.set(
             self.status_text.get() +
-            f" | {len(platforms)}个平台已保存至 {MAPS_FILE.name}")
+            f" | {len(platforms)}个平台已保存至 {map_path.name}")
 
     # ==================== 3. Jump marking ====================

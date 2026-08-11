@@ -45,6 +45,7 @@ from map_loader import MapLoader
 from perception_pipeline import PerceptionPipeline
 from skill_manager import SkillManager
 from transition import TransitionController, RopeStuckMonitor
+from auto_potion import AutoPotion
 
 
 # ============================================================
@@ -203,6 +204,9 @@ class AutoFarmV2App:
         # --- 决策配置 ---
         self._build_decision_config(config_tab)
 
+        # --- 自动药水配置 ---
+        self._build_potion_config(config_tab)
+
         # 恢复缓存地图
         cached_map = cache.get("map", "")
         if cached_map and hasattr(self, 'map_var'):
@@ -261,7 +265,7 @@ class AutoFarmV2App:
         self._debug_var.set(debug_val)
 
         # 游戏窗口
-        cached_win = cache.get("window_title", "WingsMs")
+        cached_win = cache.get("window_title", "冒险岛怀旧服")
         self.window_var.set(cached_win)
 
         # 普通攻击键位
@@ -414,11 +418,20 @@ class AutoFarmV2App:
         self.perception = PerceptionPipeline(
             self.calib, self.template, self.search_region,
             self.yolo_model, self.wm, self.actions,
+            dot_hsv_lower=result.dot_hsv_lower,
+            dot_hsv_upper=result.dot_hsv_upper,
             log_cb=self._log_error)
         self.transition = TransitionController(
             self.actions,
             log_cb=self._log_error,
             nearby_monster_check=self._nearby_monster_on_platform)
+
+        # 自动药水
+        self.potion = AutoPotion(
+            hp_rect=list(result.hp_rect) if result.hp_rect else [],
+            mp_rect=list(result.mp_rect) if result.mp_rect else [],
+            key_sender=self.actions.keys,
+        )
 
         # 读取技能配置
         self.skills.read_configs()
@@ -457,6 +470,16 @@ class AutoFarmV2App:
         except Exception:
             pass
         self._log_error("=== 自动打怪 v2 启动 ===")
+
+        # 同步药水配置
+        self._apply_potion_config()
+        if hasattr(self, 'potion'):
+            self._log_error(
+                f"[药水] HP={'启用' if self.potion.hp_enabled else '禁用'}"
+                f" {self.potion.hp_mode} {self.potion.hp_threshold} 键={self.potion.hp_key} | "
+                f"MP={'启用' if self.potion.mp_enabled else '禁用'}"
+                f" {self.potion.mp_mode} {self.potion.mp_threshold} 键={self.potion.mp_key}"
+            )
 
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -535,6 +558,15 @@ class AutoFarmV2App:
                                       tk.StringVar(value="")).get(),
                 "min_monsters": self.min_monsters_var.get(),
                 "debug_screenshot": self._debug_enabled,
+                # 自动药水
+                "hp_enabled": self.hp_enabled_var.get(),
+                "hp_mode": self.hp_mode_var.get(),
+                "hp_threshold": self.hp_threshold_var.get(),
+                "hp_key": self.hp_key_var.get(),
+                "mp_enabled": self.mp_enabled_var.get(),
+                "mp_mode": self.mp_mode_var.get(),
+                "mp_threshold": self.mp_threshold_var.get(),
+                "mp_key": self.mp_key_var.get(),
             }
             with open(self._config_cache_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -570,6 +602,8 @@ class AutoFarmV2App:
             if frame is None:
                 return 0
             self.perception.perceive(frame, self.state, self.target_hwnd, self.frame_count)
+            if hasattr(self, 'potion'):
+                self.potion.update(frame, log_cb=self._log_error)
             px: float = self.state.player_minimap_x
             py: float = self.state.player_minimap_y
             if px == 0 and py == 0:
@@ -649,12 +683,18 @@ class AutoFarmV2App:
                         (mx + 8, my - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
 
         cv2.imwrite(str(fname), annotated)
+        # 兜底：OpenCV 5.x 的 imwrite 不支持中文路径，失败时用 imencode 绕过
+        if not fname.exists():
+            import cv2 as _cv2
+            _, buf = _cv2.imencode(".png", annotated)
+            fname.write_bytes(buf.tobytes())
 
     # --- 主循环 ---
 
     def _loop(self) -> None:
         target_hwnd = self.target_hwnd
         wm = self.wm
+        self._log_error("[诊断] 主循环启动")
 
         while self.running:
             t0 = time.time()
@@ -688,6 +728,10 @@ class AutoFarmV2App:
                 if self.running:
                     self.skills.process(now)
 
+                # ---- 自动药水（后台执行，不中断移动/攻击） ----
+                if hasattr(self, 'potion'):
+                    self.potion.update(frame, log_cb=self._log_error)
+
                 # ---- 决策 ----
                 logic_interval = 0.3 if self.patrol_mode_var.get() == "fixed_route" else LOGIC_INTERVAL
                 if self.running and now - self._last_logic >= logic_interval and wm:
@@ -697,7 +741,10 @@ class AutoFarmV2App:
                         if tr.action in ("complete", "interrupt"):
                             self._current_command = None
                             self._log_error(tr.log_message)
-                            self._current_waypoint_idx = self._recalc_waypoint()
+                            # complete → 重算途经点继续前进
+                            # interrupt → 保持当前途经点（等待下次决策重新规划）
+                            if tr.action == "complete":
+                                self._current_waypoint_idx = self._recalc_waypoint()
                     else:
                         patrol_mode = self.patrol_mode_var.get()
                         strategy = self._strategy.get(patrol_mode, self._strategy.get("auto_hunt"))
@@ -806,13 +853,6 @@ class AutoFarmV2App:
         if self._aoe_key_combo:
             self._aoe_key_combo.config(state="readonly")
 
-        # 普通攻击键位：默认 Ctrl，如果被单体/群体技能占用则置空
-        used_keys = {self.single_skill_key_var.get(), self.aoe_skill_key_var.get()}
-        if "Ctrl" in used_keys:
-            self.normal_attack_key_var.set("")
-        else:
-            self.normal_attack_key_var.set("Ctrl")
-
     def _build_map_config(self, parent: tk.Widget) -> None:
         """构建地图配置面板（置于职业配置上方）。"""
         panel = tk.LabelFrame(parent, text="地图配置",
@@ -906,14 +946,13 @@ class AutoFarmV2App:
 
         tk.Label(row4, text="普通攻击:",
                  font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
-        self._normal_attack_label = tk.Label(row4, text="Ctrl",
-                                              font=("Microsoft YaHei", 9), fg="#555")
-        self._normal_attack_label.pack(side="left")
         self._normal_attack_combo = ttk.Combobox(row4,
                                                   textvariable=self.normal_attack_key_var,
                                                   values=key_display_names,
                                                   state="readonly", width=8,
                                                   font=("Microsoft YaHei", 9))
+        self._normal_attack_combo.bind("<<ComboboxSelected>>",
+                                        lambda e: self._save_config())
         self._normal_attack_combo.pack(side="left", padx=(4, 0))
 
     def _get_skill_info(self, skill_name: str) -> dict | None:
@@ -1011,6 +1050,7 @@ class AutoFarmV2App:
 
     def _on_patrol_mode_change(self) -> None:
         """巡逻方式变更时的处理"""
+        self._save_config()  # 显式保存
         mode = self.patrol_mode_var.get()
         if mode == "fixed_route":
             self._monster_config_frame.pack_forget()
@@ -1060,9 +1100,9 @@ class AutoFarmV2App:
 
         tk.Label(control_row, text="游戏窗口:",
                  font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
-        self.window_var = tk.StringVar(value="WingsMs")
+        self.window_var = tk.StringVar(value="冒险岛怀旧服")
         self.window_combo = ttk.Combobox(control_row, textvariable=self.window_var,
-                                          values=["WingsMs"], state="readonly",
+                                          values=["冒险岛怀旧服"], state="readonly",
                                           width=28, font=("Microsoft YaHei", 9))
         self.window_combo.pack(side="left", padx=(0, 15))
         self.window_combo.bind("<Button-1>", self._on_window_dropdown_click)
@@ -1092,6 +1132,72 @@ class AutoFarmV2App:
         if self.running:
             self.stop()
         self.root.destroy()
+
+    # ---- 自动药水 ----
+
+    def _build_potion_config(self, parent):
+        """构建自动药水配置面板。"""
+        panel = tk.LabelFrame(parent, text="自动药水",
+                              font=("Microsoft YaHei", 9, "bold"))
+        panel.pack(fill="x", padx=8, pady=(2, 0))
+        _save = lambda *_: self._save_config()
+        self.hp_enabled_var = tk.BooleanVar(value=False)
+        self.hp_mode_var = tk.StringVar(value="百分比")
+        self.hp_threshold_var = tk.StringVar(value="50")
+        self.hp_key_var = tk.StringVar(value="Q")
+        self.mp_enabled_var = tk.BooleanVar(value=False)
+        self.mp_mode_var = tk.StringVar(value="百分比")
+        self.mp_threshold_var = tk.StringVar(value="30")
+        self.mp_key_var = tk.StringVar(value="W")
+        for var in [self.hp_enabled_var, self.mp_enabled_var,
+                    self.hp_mode_var, self.mp_mode_var,
+                    self.hp_threshold_var, self.mp_threshold_var,
+                    self.hp_key_var, self.mp_key_var]:
+            var.trace_add("write", _save)
+        potion_key_choices = [d for d, _ in SKILL_KEY_CHOICES]
+        f_hp = tk.Frame(panel); f_hp.pack(fill="x", padx=4, pady=2)
+        tk.Checkbutton(f_hp, variable=self.hp_enabled_var, text="", width=2).pack(side="left")
+        tk.Label(f_hp, text="血量", font=("Microsoft YaHei", 9), width=6, anchor="w").pack(side="left")
+        ttk.Combobox(f_hp, textvariable=self.hp_mode_var, values=["百分比", "固定值"],
+                     state="readonly", width=6).pack(side="left", padx=2)
+        tk.Entry(f_hp, textvariable=self.hp_threshold_var, width=5,
+                 font=("Courier", 10)).pack(side="left", padx=2)
+        ttk.Combobox(f_hp, textvariable=self.hp_key_var,
+                     values=potion_key_choices, state="readonly",
+                     width=6).pack(side="left", padx=2)
+        f_mp = tk.Frame(panel); f_mp.pack(fill="x", padx=4, pady=2)
+        tk.Checkbutton(f_mp, variable=self.mp_enabled_var, text="", width=2).pack(side="left")
+        tk.Label(f_mp, text="蓝量", font=("Microsoft YaHei", 9), width=6, anchor="w").pack(side="left")
+        ttk.Combobox(f_mp, textvariable=self.mp_mode_var, values=["百分比", "固定值"],
+                     state="readonly", width=6).pack(side="left", padx=2)
+        tk.Entry(f_mp, textvariable=self.mp_threshold_var, width=5,
+                 font=("Courier", 10)).pack(side="left", padx=2)
+        ttk.Combobox(f_mp, textvariable=self.mp_key_var,
+                     values=potion_key_choices, state="readonly",
+                     width=6).pack(side="left", padx=2)
+        cache = self._load_config()
+        self.hp_enabled_var.set(cache.get("hp_enabled", False))
+        self.hp_mode_var.set(cache.get("hp_mode", "百分比"))
+        self.hp_threshold_var.set(cache.get("hp_threshold", "50"))
+        self.hp_key_var.set(cache.get("hp_key", "Q"))
+        self.mp_enabled_var.set(cache.get("mp_enabled", False))
+        self.mp_mode_var.set(cache.get("mp_mode", "百分比"))
+        self.mp_threshold_var.set(cache.get("mp_threshold", "30"))
+        self.mp_key_var.set(cache.get("mp_key", "W"))
+
+    def _apply_potion_config(self):
+        """将 UI 配置同步到 AutoPotion 实例。"""
+        if not hasattr(self, 'potion'): return
+        self.potion.hp_key = config.SKILL_KEY_LOOKUP.get(self.hp_key_var.get(), 'Q')
+        self.potion.hp_enabled = self.hp_enabled_var.get()
+        self.potion.hp_mode = self.hp_mode_var.get()
+        try: self.potion.hp_threshold = int(self.hp_threshold_var.get())
+        except ValueError: pass
+        self.potion.mp_enabled = self.mp_enabled_var.get()
+        self.potion.mp_mode = self.mp_mode_var.get()
+        try: self.potion.mp_threshold = int(self.mp_threshold_var.get())
+        except ValueError: pass
+        self.potion.mp_key = config.SKILL_KEY_LOOKUP.get(self.mp_key_var.get(), 'W')
 
 
 # ============================================================

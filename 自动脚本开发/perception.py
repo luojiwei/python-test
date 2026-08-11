@@ -70,6 +70,8 @@ def find_character(frame_bgr: np.ndarray, template_bgr: np.ndarray,
                    search_region: tuple[int, int, int, int]) -> tuple[int, int, float] | None:
     sx1, sy1, sx2, sy2 = search_region
     th, tw = template_bgr.shape[:2]
+    if th <= 0 or tw <= 0:
+        return None
     roi = frame_bgr[sy1:sy2, sx1:sx2]
     if roi.shape[0] < th or roi.shape[1] < tw:
         return None
@@ -114,10 +116,16 @@ def detect_monsters(model, frame_bgr: np.ndarray) -> list[dict]:
 # 小地图黄点定位
 # ============================================================
 
-def find_yellow_dot(mm_bgr: np.ndarray) -> tuple[float, float] | None:
-    """在小地图截图中找角色黄点，返回 (x, y) 或 None"""
+def find_yellow_dot(mm_bgr: np.ndarray,
+                     hsv_lower: np.ndarray | None = None,
+                     hsv_upper: np.ndarray | None = None) -> tuple[float, float] | None:
+    """在小地图截图中找角色黄点，返回 (x, y) 或 None。
+    如传入 hsv_lower/hsv_upper 则使用自定义阈值，否则用 config 默认值。
+    """
+    lw = hsv_lower if hsv_lower is not None else DOT_HSV_LOWER
+    up = hsv_upper if hsv_upper is not None else DOT_HSV_UPPER
     hsv = cv2.cvtColor(mm_bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, DOT_HSV_LOWER, DOT_HSV_UPPER)
+    mask = cv2.inRange(hsv, lw, up)
     if mask.sum() < 5:
         return None
     num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)

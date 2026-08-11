@@ -11,7 +11,7 @@
   },
   "魔法师": {
     "single_skills": [
-      {"name": "魔力双击", "range": 120}
+      {"name": "魔力双击", "range": 150}
     ],
     "aoe_skills": [
       {"name": "雷电术", "range": 80}
