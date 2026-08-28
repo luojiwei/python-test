@@ -1,5 +1,6 @@
-"""perception.py — 感知：模板匹配、YOLO检测、小地图定位、游戏状态"""
+"""perception.py — 感知：YOLO检测、OCR角色定位、小地图定位、游戏状态"""
 
+import threading
 from dataclasses import dataclass, field
 import logging
 
@@ -12,11 +13,117 @@ from edge_types import EdgeType
 import config
 from config import (
     YOLO_CONF, YOLO_IOU,
-    MATCH_THRESHOLD, SEARCH_BOTTOM_SKIP_PCT,
     DOT_HSV_LOWER, DOT_HSV_UPPER,
+    MONSTER_CLASS_NAMES, PLAYER_CLASS_NAME,
+    CHARACTER_NAME, PLAYER_NAME_ROI_ABOVE, PLAYER_NAME_ROI_BELOW,
+    OCR_UPSCALE, OCR_NAME_MATCH_THRESHOLD,
 )
 
 _logger = logging.getLogger(__name__)
+
+# ============================================================
+# OCR 引擎（延迟加载，全局单例）
+# ============================================================
+
+_ocr_engine = None
+_ocr_engine_lock = threading.Lock()
+
+
+def _get_ocr_engine():
+    """延迟加载 RapidOCR 引擎（首次调用初始化，之后复用）。"""
+    global _ocr_engine
+    if _ocr_engine is None:
+        with _ocr_engine_lock:
+            if _ocr_engine is None:
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+                    _ocr_engine = RapidOCR()
+                except Exception as e:
+                    _logger.warning(f"OCR 引擎加载失败: {e}，角色 OCR 识别不可用")
+                    return None
+    return _ocr_engine
+
+
+def _ocr_text(img_bgr: np.ndarray) -> str:
+    """对图像做 OCR，返回拼接后的文本（失败返回空串）。"""
+    engine = _get_ocr_engine()
+    if engine is None or img_bgr is None or img_bgr.size == 0:
+        return ""
+    try:
+        result, _ = engine(img_bgr)
+        if not result:
+            return ""
+        texts = [str(item[1]) for item in result if len(item) >= 2]
+        return "".join(texts)
+    except Exception as e:
+        _logger.warning(f"OCR 识别异常: {e}")
+        return ""
+
+
+def _normalize_name(s: str) -> str:
+    """昵称归一化：去掉空白与标点，保留中文/字母/数字，转小写。"""
+    return "".join(ch for ch in s
+                   if ch.isalnum() or '\u4e00' <= ch <= '\u9fff').lower()
+
+
+def _name_match(ocr_text: str, target: str) -> float:
+    """模糊匹配 OCR 文本与目标角色名，返回相似度 0~1。
+
+    角色名被遮挡时 OCR 常只识别出部分/形近字符（如漏字、错字、混入
+    其他文字），单一策略会漏判。这里组合多种策略取最大值：
+      1) 完全相等 → 1.0
+      2) 子串包含（OCR 漏字/多字，如 "小罗" ⊂ "爱吃姜的小罗"）→ 0.9
+      3) LCS 最长公共子序列长度归一化（容忍前后混入干扰文字）
+      4) SequenceMatcher 字符级相似度
+      5) 字符集 Jaccard（容忍乱序/漏字，中文昵称较短时较稳健）
+    """
+    a = _normalize_name(ocr_text)
+    b = _normalize_name(target)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if a in b or b in a:  # 包含关系：OCR 常漏字/多字
+        return 0.9
+
+    from difflib import SequenceMatcher
+    sm = SequenceMatcher(None, a, b, autojunk=False)
+
+    # 3) LCS 长度（跳过干扰字符），按较短串归一化
+    lcs = sum(blk.size for blk in sm.get_matching_blocks())
+    lcs_ratio = lcs / max(1, min(len(a), len(b)))
+
+    # 4) 字符级相似度
+    ratio = sm.ratio()
+
+    # 5) 字符集 Jaccard
+    sa, sb = set(a), set(b)
+    jaccard = len(sa & sb) / max(1, len(sa | sb))
+
+    return max(0.0, min(1.0, max(lcs_ratio, ratio, jaccard)))
+
+
+def _crop_player_name_roi(frame_bgr: np.ndarray,
+                          box: dict) -> np.ndarray | None:
+    """裁剪玩家昵称区域（昵称浮字在头顶，战斗中常被伤害数字压进玩家框内）。
+
+    ROI = [x1, y1-上方延伸, x2, y2+底部余量]，覆盖"头顶上方 + 整个玩家框"，
+    保证昵称无论浮在头顶上方还是被战斗数字遮挡落到框内都能被 OCR 捕获。
+    放大 OCR_UPSCALE 倍后返回。
+    保留 BGR 彩色让 RapidOCR 内部做检测与识别，避免自适应二值化丢失描边信息。
+    """
+    h, w = frame_bgr.shape[:2]
+    x1 = max(0, int(box["x1"]))
+    x2 = min(w, int(box["x2"]))
+    y1 = max(0, int(box["y1"]) - PLAYER_NAME_ROI_ABOVE)
+    y2 = min(h, int(box["y2"]) + PLAYER_NAME_ROI_BELOW)
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return None
+    roi = frame_bgr[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None
+    return cv2.resize(roi, None, fx=OCR_UPSCALE, fy=OCR_UPSCALE,
+                      interpolation=cv2.INTER_CUBIC)
 
 
 def get_yolo_device() -> str | int:
@@ -63,53 +170,76 @@ def move_model_to_device(yolo_model) -> None:
         _logger.warning(f"模型迁移到 {device} 失败: {e}，保持 CPU 运行")
 
 # ============================================================
-# 模板匹配 — 角色定位
+# YOLO 检测（一次推理：怪物 + 玩家）
 # ============================================================
 
-def find_character(frame_bgr: np.ndarray, template_bgr: np.ndarray,
-                   search_region: tuple[int, int, int, int]) -> tuple[int, int, float] | None:
-    sx1, sy1, sx2, sy2 = search_region
-    th, tw = template_bgr.shape[:2]
-    if th <= 0 or tw <= 0:
-        return None
-    roi = frame_bgr[sy1:sy2, sx1:sx2]
-    if roi.shape[0] < th or roi.shape[1] < tw:
-        return None
-    result = cv2.matchTemplate(roi, template_bgr, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-    if max_val < MATCH_THRESHOLD:
-        return None
-    cx = sx1 + max_loc[0] + tw // 2
-    cy = sy1 + max_loc[1] + th // 2
-    return cx, cy, max_val
+def detect_objects(model, frame_bgr: np.ndarray) -> tuple[list[dict], list[dict]]:
+    """YOLO 一次推理 → (怪物列表, 玩家列表)。
 
-
-# ============================================================
-# YOLO 怪物检测
-# ============================================================
-
-def detect_monsters(model, frame_bgr: np.ndarray) -> list[dict]:
-    """YOLO推理 → 只返回怪物"""
+    怪物按「怪物类型标签」MONSTER_CLASS_NAMES 判定；
+    玩家按「玩家类别名」PLAYER_CLASS_NAME 判定。
+    """
     results = model.predict(frame_bgr, conf=YOLO_CONF, iou=YOLO_IOU,
                             device=get_yolo_device(), verbose=False)
     monsters: list[dict] = []
+    players: list[dict] = []
     for r in results:
         if r.boxes is None:
             continue
         for box in r.boxes:
             cls_id = int(box.cls)
             cls_name = config.CLASS_NAMES.get(cls_id, "")
-            if cls_name in config.NON_MONSTER_NAMES:
-                continue
             conf = float(box.conf)
             xyxy = box.xyxy.tolist()[0]
             x1, y1, x2, y2 = xyxy
-            monsters.append({
+            item = {
                 "cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2,
                 "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                "conf": conf, "cls": cls_id,
-            })
+                "conf": conf, "cls": cls_id, "cls_name": cls_name,
+            }
+            if cls_name in MONSTER_CLASS_NAMES:
+                monsters.append(item)
+            elif cls_name == PLAYER_CLASS_NAME:
+                players.append(item)
+    return monsters, players
+
+
+def detect_monsters(model, frame_bgr: np.ndarray) -> list[dict]:
+    """YOLO推理 → 只返回怪物（按怪物类型标签判定）。"""
+    monsters, _ = detect_objects(model, frame_bgr)
     return monsters
+
+
+def find_character_by_ocr(frame_bgr: np.ndarray,
+                          players: list[dict],
+                          char_name: str | None = None) -> tuple[int, int, float] | None:
+    """从玩家列表中 OCR 识别昵称，模糊匹配角色名，返回角色屏幕坐标。
+
+    Args:
+        frame_bgr: 游戏截图 (BGR)
+        players: detect_objects 返回的玩家框列表
+        char_name: 角色名（为空时用 config.CHARACTER_NAME）
+
+    Returns:
+        (cx, cy, score) 或 None。score 为模糊匹配相似度。
+    """
+    target = (char_name or CHARACTER_NAME or "").strip()
+    if not target or not players:
+        return None
+    best: tuple[int, int, float] | None = None
+    best_score = 0.0
+    for p in players:
+        roi = _crop_player_name_roi(frame_bgr, p)
+        text = _ocr_text(roi) if roi is not None else ""
+        if not text:
+            continue
+        score = _name_match(text, target)
+        if score > best_score:
+            best_score = score
+            best = (int(p["cx"]), int((p["y1"] + p["y2"]) / 2), score)
+    if best is not None and best_score >= OCR_NAME_MATCH_THRESHOLD:
+        return best
+    return None
 
 
 # ============================================================

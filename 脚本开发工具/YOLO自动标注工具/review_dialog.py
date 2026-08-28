@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QFont, QImage
 from PySide6.QtCore import Qt, QRectF, QPointF
 
-from config import load_reviewed_stems
+from config import load_reviewed_stems, load_trained_stems
 
 CLASS_NAMES: dict[int, str] = {0: "怪物", 1: "绳子上", 2: "绳子下", 3: "梯子上", 4: "梯子下", 5: "玩家", 6: "宠物"}
 CLASS_COLORS: list[str] = ["#00DD00", "#FF4444", "#FF8800", "#4488FF", "#AA00EE", "#00CCCC", "#FF66AA"]
@@ -173,7 +173,7 @@ class ReviewDialog(QDialog):
                  on_close=None, reviewed_stems: set[str] | None = None) -> None:
         super().__init__(parent)
         self._all_images = images  # 全部图片
-        self._reviewed_stems_before = reviewed_stems or set()  # 进来时已审查的
+        self._reviewed_stems_before = reviewed_stems or set()  # 进来时已处理（已审核+已训练）的
         self._filtered_images = images  # 当前筛选后的图片
         self._filter_mode = "unreviewed"  # "unreviewed" | "reviewed"
         self.labels_train = labels_train
@@ -241,13 +241,14 @@ class ReviewDialog(QDialog):
                                      if img.stem not in self._reviewed_stems_before
                                      and img.stem not in self._reviewed_stems]
         elif self._filter_mode == "current_reviewed":
-            # 本轮已审核的
+            # 已审核 = .reviewed 缓存（已审核待训练）+ 本次会话新审核的
+            reviewed = load_reviewed_stems() | self._reviewed_stems
             self._filtered_images = [img for img in self._all_images
-                                     if img.stem in self._reviewed_stems]
-        else:  # history = 所有历史已审查的
-            reviewed_all = load_reviewed_stems() | self._reviewed_stems
+                                     if img.stem in reviewed]
+        else:  # history = 已训练完成的图片
+            trained = load_trained_stems()
             self._filtered_images = [img for img in self._all_images
-                                     if img.stem in reviewed_all]
+                                     if img.stem in trained]
 
     def _toggle_filter(self, mode: str) -> None:
         """切换筛选模式。"""
@@ -264,9 +265,10 @@ class ReviewDialog(QDialog):
         unreviewed = len([1 for img in self._all_images
                           if img.stem not in self._reviewed_stems_before
                           and img.stem not in self._reviewed_stems])
-        current = len(self._reviewed_stems)
-        reviewed_all = load_reviewed_stems() | self._reviewed_stems
-        reviewed = len([1 for img in self._all_images if img.stem in reviewed_all])
+        current = len([1 for img in self._all_images
+                       if img.stem in (load_reviewed_stems() | self._reviewed_stems)])
+        trained = load_trained_stems()
+        reviewed = len([1 for img in self._all_images if img.stem in trained])
         self._btn_unreviewed.setText(f"待审查 ({unreviewed})")
         self._btn_unreviewed.setChecked(self._filter_mode == "unreviewed")
         self._btn_current.setText(f"已审核 ({current})")

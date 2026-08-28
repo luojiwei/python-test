@@ -6,7 +6,7 @@
 用法:
     python scripts/auto_label.py --weights outputs/results/train/weights/best.pt \
         --source screenshots/ --output dataset/labels/train \
-        --conf 0.3 --img-width 1280 --img-height 720 --device auto
+        --conf 0.3 --img-width 1366 --img-height 768 --device auto
 """
 
 import sys
@@ -75,8 +75,8 @@ def main():
     parser.add_argument("--output", required=True, help="标注输出目录 (YOLO .txt)")
     parser.add_argument("--conf", type=float, default=0.3, help="置信度阈值")
     parser.add_argument("--iou", type=float, default=0.45, help="NMS IoU 阈值")
-    parser.add_argument("--img-width", type=int, default=1280, help="图片宽度")
-    parser.add_argument("--img-height", type=int, default=720, help="图片高度")
+    parser.add_argument("--img-width", type=int, default=1366, help="图片宽度")
+    parser.add_argument("--img-height", type=int, default=768, help="图片高度")
     parser.add_argument("--device", default="auto",
                          help="设备: auto / cpu / cuda:0 / dml:0")
     parser.add_argument("--skip-existing", action="store_true",

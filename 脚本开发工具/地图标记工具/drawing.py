@@ -345,12 +345,15 @@ def draw_rope_preview(mm_snapshot, mm_size, map_name,
 def draw_markers_overview(mm_snapshot, mm_size, map_name,
                           platforms: list, ropes: list,
                           jumps: list, flashes: list,
-                          target_size=None):
+                          target_size=None, highlight=None):
     """Draw minimap background with all saved platforms, rope ladders, jumps and flashes.
 
     Platforms are drawn with dots + simplified polyline in a single color.
     Rope ladders are drawn as yellow line segments with endpoint dots.
     Jumps are blue arrows; flashes are red/green arrows.
+
+    highlight: 可选 dict {"platform": idx, "rope": idx, "jump": idx, "flash": idx}，
+               对应索引的标记用红色高亮绘制（查看/编辑选中态）。
     """
     w, h = mm_size
     if w <= 0 or h <= 0:
@@ -386,56 +389,67 @@ def draw_markers_overview(mm_snapshot, mm_size, map_name,
 
     PLAT_COLOR = (155, 89, 182)
     ROPE_COLOR = (241, 196, 15)
+    HI_COLOR = (255, 50, 50)
+    highlight = highlight or {}
 
     # --- Draw platforms ---
-    for plat in platforms:
+    for pi, plat in enumerate(platforms):
         all_pts = plat.get("all_points", [])
         if not all_pts:
             continue
+        hi = highlight.get("platform") == pi
+        color = HI_COLOR if hi else PLAT_COLOR
 
         for px, py in all_pts:
             dx: int = int(px * rx)
             dy: int = int(py * ry)
-            draw.ellipse([dx - 2, dy - 2, dx + 2, dy + 2], fill=PLAT_COLOR)
+            draw.ellipse([dx - 2, dy - 2, dx + 2, dy + 2], fill=color)
 
         tp = plat.get("turning_points", [])
         if len(tp) >= 2:
             pts = [(int(p["x"] * rx), int(p["y"] * ry)) for p in tp]
             for i in range(len(pts) - 1):
-                draw.line([pts[i], pts[i + 1]], fill=PLAT_COLOR, width=2)
+                draw.line([pts[i], pts[i + 1]], fill=color, width=3 if hi else 2)
             for px, py in pts:
                 draw.ellipse([px - 4, py - 4, px + 4, py + 4],
-                             outline=PLAT_COLOR, width=max(1, int(ratio)))
+                             outline=color, width=max(1, int(ratio)))
 
     # --- Draw rope ladders ---
-    for r in ropes:
+    for ri, r in enumerate(ropes):
+        hi = highlight.get("rope") == ri
+        color = HI_COLOR if hi else ROPE_COLOR
         t: dict = r.get("top", {})
         b: dict = r.get("bottom", {})
         dx1: int = int(t.get("x", 0) * rx)
         dy1: int = int(t.get("y", 0) * ry)
         dx2: int = int(b.get("x", 0) * rx)
         dy2: int = int(b.get("y", 0) * ry)
-        draw.line([(dx1, dy1), (dx2, dy2)], fill=ROPE_COLOR, width=2)
-        draw.ellipse([dx1 - 3, dy1 - 3, dx1 + 3, dy1 + 3], fill=ROPE_COLOR)
-        draw.ellipse([dx2 - 3, dy2 - 3, dx2 + 3, dy2 + 3], fill=ROPE_COLOR)
+        draw.line([(dx1, dy1), (dx2, dy2)], fill=color, width=3 if hi else 2)
+        draw.ellipse([dx1 - 3, dy1 - 3, dx1 + 3, dy1 + 3], fill=color)
+        draw.ellipse([dx2 - 3, dy2 - 3, dx2 + 3, dy2 + 3], fill=color)
 
     # --- Draw jump arrows ---
     JUMP_COLOR: tuple = (52, 152, 219)
-    for j in jumps:
+    for ji, j in enumerate(jumps):
+        hi = highlight.get("jump") == ji
         frm = j.get("from", {}); to = j.get("to", {})
         fx, fy = frm.get("x", 0), frm.get("y", 0)
         tx, ty = to.get("x", 0), to.get("y", 0)
-        _draw_arrow(draw, fx, fy, tx, ty, rx, ry, JUMP_COLOR, wd=2)
+        color = HI_COLOR if hi else JUMP_COLOR
+        _draw_arrow(draw, fx, fy, tx, ty, rx, ry, color, wd=3 if hi else 2)
 
     # --- Draw flash / teleport arrows ---
     FLASH_1WAY: tuple = (231, 76, 60)
     FLASH_2WAY: tuple = (46, 204, 113)
-    for fl in flashes:
+    for fi, fl in enumerate(flashes):
+        hi = highlight.get("flash") == fi
         frm = fl.get("from", {}); to = fl.get("to", {})
         fx, fy = frm.get("x", 0), frm.get("y", 0)
         tx, ty = to.get("x", 0), to.get("y", 0)
         tp = fl.get("type", "one_way")
         color = FLASH_2WAY if tp == "two_way" else FLASH_1WAY
+        if hi:
+            color = HI_COLOR
         dx1, dy1 = int(fx * rx), int(fy * ry)
         dx2, dy2 = int(tx * rx), int(ty * ry)
         draw.line([(dx1, dy1), (dx2, dy2)], fill=color, width=2)

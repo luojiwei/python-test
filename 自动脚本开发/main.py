@@ -3,7 +3,7 @@
 auto_farm_v2.py — 命令驱动、跨平台自动寻路打怪脚本
 
 架构: 主线程(GUI) + daemon 子线程(游戏循环)
-  - 感知: 截图+YOLO+模板+小地图
+  - 感知: 截图+YOLO(怪物/玩家)+OCR(角色名)+小地图
   - 决策: 判断位置→生成命令 (每 1s)
   - 执行: 持续运行当前命令 (每 tick)
 """
@@ -32,7 +32,7 @@ from config import (
 )
 from input_utils import (
     KeySender, find_window_by_title, capture_frame,
-    enum_visible_windows,
+    force_foreground, enum_visible_windows,
 )
 from perception import (
     GameState, Calibrator,
@@ -64,8 +64,7 @@ class AutoFarmV2App:
         self.running: bool = False
         self.thread: threading.Thread | None = None
         self.target_hwnd: int | None = None
-        self.template: np.ndarray | None = None
-        self.search_region: tuple[int, int, int, int] = (0, 0, 0, 0)
+        self.char_name: str = ""    # 角色名（玩家OCR模糊匹配定位用）
         self.keys = KeySender()
         self.keys.set_log_callback(self._on_key)
         self.state = GameState()
@@ -124,6 +123,10 @@ class AutoFarmV2App:
         self._patrol_return_method: str = "一直走"
         self._current_waypoint_idx: int = 0
 
+        # --- 配置项统一注册表（自动缓存/恢复，新增配置项只需注册一行） ---
+        self._config_registry: dict[str, tuple] = {}
+        self._config_restored: bool = False   # 注册完成前禁止落盘，防止部分覆盖
+
         # --- GUI ---
         root.title("自动打怪 v2")
         root.geometry("800x740")
@@ -144,6 +147,12 @@ class AutoFarmV2App:
         notebook.add(config_tab, text="配置")
         notebook.add(log_tab, text="日志")
 
+        # 禁止左右方向键切换标签页（打怪时键盘焦点在 Notebook 上会误切 tab）
+        notebook.bind("<Left>", lambda _e: "break")
+        notebook.bind("<Right>", lambda _e: "break")
+        notebook.bind("<Up>", lambda _e: "break")
+        notebook.bind("<Down>", lambda _e: "break")
+
         # ========================
         # Tab 1: 配置
         # ========================
@@ -160,34 +169,7 @@ class AutoFarmV2App:
         # --- 加载缓存配置 ---
         self._config_cache_path: Path = PROJECT_DIR / "config_cache.json"
         cached_skills = SkillManager.load_cached_skills()
-        cache = self._load_config()
-        cached_occ = cache.get("occupation", "")
-        cached_single = cache.get("single_skill", "")
-        cached_aoe = cache.get("aoe_skill", "")
-        cached_single_key = cache.get("single_skill_key", "")
-        cached_aoe_key = cache.get("aoe_skill_key", "")
-        cached_rule_code = cache.get("skill_rule", "mixed")
-        if cached_occ and cached_occ in OCCUPATION_DATA:
-            self.occupation_var.set(cached_occ)
-            self._on_occupation_change()
-            occ_data = OCCUPATION_DATA[cached_occ]
-            valid_single = [s["name"] for s in occ_data.get("single_skills", [])]
-            valid_aoe = [s["name"] for s in occ_data.get("aoe_skills", [])] + \
-                        [s["name"] for s in occ_data.get("fullscreen_skills", [])]
-            if cached_single in valid_single:
-                self.single_skill_var.set(cached_single)
-            if cached_aoe in valid_aoe:
-                self.aoe_skill_var.set(cached_aoe)
-            if cached_single_key:
-                valid_keys = [d for d, _ in SKILL_KEY_CHOICES]
-                if cached_single_key in valid_keys:
-                    self.single_skill_key_var.set(cached_single_key)
-            if cached_aoe_key:
-                valid_keys = [d for d, _ in SKILL_KEY_CHOICES]
-                if cached_aoe_key in valid_keys:
-                    self.aoe_skill_key_var.set(cached_aoe_key)
-        if cached_rule_code in SKILL_RULE_CODE_TO_DISPLAY:
-            self.skill_rule_var.set(SKILL_RULE_CODE_TO_DISPLAY[cached_rule_code])
+        # 职业/技能/决策/药水等配置项统一在 _restore_and_trace_config() 注册恢复
 
         if cached_skills:
             for item in cached_skills:
@@ -207,24 +189,7 @@ class AutoFarmV2App:
         # --- 自动药水配置 ---
         self._build_potion_config(config_tab)
 
-        # 恢复缓存地图
-        cached_map = cache.get("map", "")
-        if cached_map and hasattr(self, 'map_var'):
-            try:
-                self.map_var.set(cached_map)
-            except Exception:
-                pass
-
-        # 恢复缓存的决策配置
-        try:
-            self.patrol_mode_var.set(cache.get("patrol_mode", "auto_hunt"))
-            self.min_monsters_var.set(int(cache.get("min_monsters", 3)))
-            self._on_patrol_mode_change()
-            route_name = cache.get("route_name", "")
-            if route_name:
-                self._route_dropdown_var.set(route_name)
-        except Exception:
-            pass
+        # 地图/决策/药水缓存恢复统一在 _restore_and_trace_config() 处理
 
         # ========================
         # Tab 2: 日志
@@ -255,30 +220,100 @@ class AutoFarmV2App:
         # --- 恢复缓存配置并注册自动保存 ---
         self._restore_and_trace_config()
 
+    def _register_config_var(self, key: str, var, default,
+                             restore_fn=None) -> None:
+        """注册配置项：启动时自动恢复缓存，变更时自动保存。
+
+        Args:
+            key: 缓存键名
+            var: tk 变量
+            default: 无缓存时的默认值
+            restore_fn: 可选自定义恢复函数（接收缓存值），
+                        用于需要转换/校验的项（如 skill_rule code→display）
+        """
+        self._config_registry[key] = (var, default)
+        cache = self._load_config()
+        try:
+            if restore_fn is not None:
+                restore_fn(cache.get(key, default))
+            else:
+                var.set(cache.get(key, default))
+        except Exception:
+            pass
+        var.trace_add("write", lambda *_: self._save_config())
+
     def _restore_and_trace_config(self) -> None:
-        """从缓存恢复所有配置项，并注册变更自动保存。"""
+        """统一注册所有配置项：恢复缓存 + 变更自动保存。
+
+        新增配置项时，只需在这里加一行 _register_config_var(...)，
+        无需再改 _save_config / _load_config。
+        """
         cache = self._load_config()
 
-        # 调试截图
-        debug_val = cache.get("debug_screenshot", True)
-        self._debug_enabled = debug_val
-        self._debug_var.set(debug_val)
+        def _restore_skill_rule(val) -> None:
+            code = val if val in SKILL_RULE_CODE_TO_DISPLAY else "mixed"
+            self.skill_rule_var.set(SKILL_RULE_CODE_TO_DISPLAY[code])
 
-        # 游戏窗口
-        cached_win = cache.get("window_title", "冒险岛怀旧服")
-        self.window_var.set(cached_win)
+        # --- 职业/技能 ---
+        self._register_config_var("occupation", self.occupation_var, "")
+        self._register_config_var("single_skill", self.single_skill_var, "")
+        self._register_config_var("aoe_skill", self.aoe_skill_var, "")
+        self._register_config_var("single_skill_key", self.single_skill_key_var, "")
+        self._register_config_var("aoe_skill_key", self.aoe_skill_key_var, "")
+        self._register_config_var("skill_rule", self.skill_rule_var,
+                                  SKILL_RULE_CODE_TO_DISPLAY["mixed"],
+                                  restore_fn=_restore_skill_rule)
+        self._register_config_var("normal_attack_key",
+                                  self.normal_attack_key_var, "Ctrl")
 
-        # 普通攻击键位
-        self.normal_attack_key_var.set(cache.get("normal_attack_key", "Ctrl"))
+        # --- 地图 / 窗口 / 角色名 ---
+        self._register_config_var("map", self.map_var, "")
+        self._register_config_var("window_title", self.window_var, "冒险岛怀旧服")
+        if hasattr(self, "char_name_var"):
+            self._register_config_var("char_name", self.char_name_var, "")
 
-        # 注册自动保存 trace
-        _save = lambda *_: self._save_config()
-        for var in (self.occupation_var, self.single_skill_var, self.aoe_skill_var,
-                     self.skill_rule_var, self.single_skill_key_var,
-                     self.aoe_skill_key_var, self.normal_attack_key_var,
-                     self.min_monsters_var, self.patrol_mode_var,
-                     self._route_dropdown_var, self.map_var, self.window_var):
-            var.trace_add("write", _save)
+        # --- 决策配置 ---
+        self._register_config_var("patrol_mode", self.patrol_mode_var, "auto_hunt")
+        self._register_config_var("min_monsters", self.min_monsters_var, 3)
+        if hasattr(self, "_route_dropdown_var"):
+            self._register_config_var("route_name", self._route_dropdown_var, "")
+
+        # --- 自动药水 ---
+        self._register_config_var("hp_enabled", self.hp_enabled_var, False)
+        self._register_config_var("hp_mode", self.hp_mode_var, "百分比")
+        self._register_config_var("hp_threshold", self.hp_threshold_var, "50")
+        self._register_config_var("hp_key", self.hp_key_var, "Q")
+        self._register_config_var("mp_enabled", self.mp_enabled_var, False)
+        self._register_config_var("mp_mode", self.mp_mode_var, "百分比")
+        self._register_config_var("mp_threshold", self.mp_threshold_var, "30")
+        self._register_config_var("mp_key", self.mp_key_var, "W")
+
+        # --- 调试截图 ---
+        if hasattr(self, "_debug_var"):
+            debug_val = cache.get("debug_screenshot", True)
+            self._debug_enabled = debug_val
+            self._debug_var.set(debug_val)
+            self._debug_var.trace_add("write", lambda *_: self._save_config())
+            self._config_registry["debug_screenshot"] = (self._debug_var, True)
+
+        # ---- 依赖 UI 的恢复后刷新（var 恢复完成后再统一触发） ----
+        self._config_restored = True   # 注册全部完成，允许落盘
+        try:
+            self._on_occupation_change()   # 职业无效会自动清空技能选择
+        except Exception:
+            pass
+        try:
+            self._on_patrol_mode_change()  # 刷新寻怪/固定路线面板
+        except Exception:
+            pass
+        # 路线名：_on_patrol_mode_change 会重置为第一条，这里补回缓存值
+        cached_route = cache.get("route_name", "")
+        if cached_route and hasattr(self, "_route_dropdown_var"):
+            try:
+                self._route_dropdown_var.set(cached_route)
+            except Exception:
+                pass
+        self._save_config()  # 落盘一次，补全新增配置键
 
     # --- 线程安全的日志输出 ---
 
@@ -368,6 +403,14 @@ class AutoFarmV2App:
         self.target_hwnd = target_hwnd
         self._run_start_time = time.time()
 
+        # 关键：启动前先把游戏窗口调到最前。
+        # keybd_event 只注入到前台窗口——若游戏不是前台（点击开始按钮后焦点在 GUI），
+        # 脚本的按键会发到 GUI 而非游戏，导致"决策步行但角色不动/不受控制"。
+        try:
+            force_foreground(target_hwnd)
+        except Exception:
+            pass
+
         map_name = self.map_var.get()
         if map_name.startswith("("):
             messagebox.showwarning("配置不完整", "请选择有效地图")
@@ -406,8 +449,7 @@ class AutoFarmV2App:
         # 写入实例变量
         self.wm = result.world_model
         self.yolo_model = result.yolo_model
-        self.template = result.template
-        self.search_region = result.search_region
+        self.char_name = self.char_name_var.get().strip()
         self._patrol_route_names = result.patrol_route_names
         self._patrol_all_routes = result.patrol_all_routes
         self._patrol_waypoints = result.patrol_waypoints
@@ -416,10 +458,13 @@ class AutoFarmV2App:
         # 延时初始化依赖资源的组件
         self.skills.actions = self.actions
         self.perception = PerceptionPipeline(
-            self.calib, self.template, self.search_region,
+            self.calib,
             self.yolo_model, self.wm, self.actions,
             dot_hsv_lower=result.dot_hsv_lower,
             dot_hsv_upper=result.dot_hsv_upper,
+            char_name=self.char_name,
+            minimap_full=result.minimap_full,
+            minimap_size=result.minimap_size,
             log_cb=self._log_error)
         self.transition = TransitionController(
             self.actions,
@@ -540,34 +585,22 @@ class AutoFarmV2App:
         return {}
 
     def _save_config(self) -> None:
-        """保存当前所有配置项到缓存文件。"""
+        """保存所有注册的配置项到缓存文件（自动遍历注册表）。"""
+        if not getattr(self, "_config_restored", False):
+            return  # 配置恢复未完成，避免部分覆盖缓存文件
         try:
-            data = {
-                "map": getattr(self, 'map_var', tk.StringVar(value="")).get(),
-                "window_title": getattr(self, 'window_var', tk.StringVar(value="")).get(),
-                "occupation": self.occupation_var.get(),
-                "single_skill": self.single_skill_var.get(),
-                "aoe_skill": self.aoe_skill_var.get(),
-                "skill_rule": SKILL_RULE_DISPLAY_TO_CODE.get(
-                    self.skill_rule_var.get(), "mixed"),
-                "single_skill_key": self.single_skill_key_var.get(),
-                "aoe_skill_key": self.aoe_skill_key_var.get(),
-                "normal_attack_key": self.normal_attack_key_var.get(),
-                "patrol_mode": self.patrol_mode_var.get(),
-                "route_name": getattr(self, '_route_dropdown_var',
-                                      tk.StringVar(value="")).get(),
-                "min_monsters": self.min_monsters_var.get(),
-                "debug_screenshot": self._debug_enabled,
-                # 自动药水
-                "hp_enabled": self.hp_enabled_var.get(),
-                "hp_mode": self.hp_mode_var.get(),
-                "hp_threshold": self.hp_threshold_var.get(),
-                "hp_key": self.hp_key_var.get(),
-                "mp_enabled": self.mp_enabled_var.get(),
-                "mp_mode": self.mp_mode_var.get(),
-                "mp_threshold": self.mp_threshold_var.get(),
-                "mp_key": self.mp_key_var.get(),
-            }
+            data: dict = {}
+            for key, (var, _default) in self._config_registry.items():
+                try:
+                    data[key] = var.get()
+                except Exception:
+                    pass
+            # 特殊转换：技能释放规则存 code（UI 显示的是 display 名）
+            rule_display = data.get("skill_rule", "")
+            data["skill_rule"] = SKILL_RULE_DISPLAY_TO_CODE.get(
+                rule_display, "mixed")
+            # 调试截图开关同步（布尔字段与 tk 变量一致）
+            data["debug_screenshot"] = self._debug_enabled
             with open(self._config_cache_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -704,6 +737,16 @@ class AutoFarmV2App:
             if self.frame_count % 30 == 0:
                 elapsed = t0 - self._run_start_time
                 self._update_status(f"运行中—已运行{elapsed:.0f}秒")
+
+                # 前台守护：keybd_event 只注入到前台窗口。用户点击 GUI 看日志后
+                # GUI 会抢走焦点，导致脚本按键发到 GUI（角色"不受控制/不动"）。
+                # 周期把游戏窗口拉回前台，确保按键注入有效。
+                try:
+                    import ctypes as _ct
+                    if _ct.windll.user32.GetForegroundWindow() != target_hwnd:
+                        force_foreground(target_hwnd)
+                except Exception:
+                    pass
 
             try:
                 if target_hwnd is None:
@@ -1107,6 +1150,14 @@ class AutoFarmV2App:
         self.window_combo.pack(side="left", padx=(0, 15))
         self.window_combo.bind("<Button-1>", self._on_window_dropdown_click)
 
+        # 角色名（玩家OCR识别定位）
+        tk.Label(control_row, text="角色名:",
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
+        self.char_name_var = tk.StringVar(value="")
+        char_entry = tk.Entry(control_row, textvariable=self.char_name_var,
+                              font=("Microsoft YaHei", 9), width=14)
+        char_entry.pack(side="left", padx=(0, 15))
+
         self.btn = tk.Button(control_row, text="开始打怪",
                               font=("Microsoft YaHei", 12, "bold"),
                               width=10, height=1,
@@ -1175,15 +1226,7 @@ class AutoFarmV2App:
         ttk.Combobox(f_mp, textvariable=self.mp_key_var,
                      values=potion_key_choices, state="readonly",
                      width=6).pack(side="left", padx=2)
-        cache = self._load_config()
-        self.hp_enabled_var.set(cache.get("hp_enabled", False))
-        self.hp_mode_var.set(cache.get("hp_mode", "百分比"))
-        self.hp_threshold_var.set(cache.get("hp_threshold", "50"))
-        self.hp_key_var.set(cache.get("hp_key", "Q"))
-        self.mp_enabled_var.set(cache.get("mp_enabled", False))
-        self.mp_mode_var.set(cache.get("mp_mode", "百分比"))
-        self.mp_threshold_var.set(cache.get("mp_threshold", "30"))
-        self.mp_key_var.set(cache.get("mp_key", "W"))
+        # 药水配置缓存恢复统一在 _restore_and_trace_config() 处理
 
     def _apply_potion_config(self):
         """将 UI 配置同步到 AutoPotion 实例。"""

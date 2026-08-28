@@ -185,6 +185,23 @@ _PIXEL_FONT_5x7 = {
     ],
 }
 
+# 备选字模：部分数字在游戏里有不同字型（如开口 4 vs 闭合 4）。
+# _classify_digit 匹配时主模板和备选模板取最高分。
+# 结构: {字符: [[字模1], [字模2], ...]}，每个字模是 7 行字符串列表。
+_PIXEL_FONT_5x7_ALT: dict[str, list[list[str]]] = {
+    '4': [  # 开口 4：顶部从右向左斜线，中间横线，下方中央一竖
+        [
+            "...#.",
+            "..##.",
+            ".#.#.",
+            "#..#.",
+            "#####",
+            "...#.",
+            "...#.",
+        ],
+    ],
+}
+
 
 def _classify_digit(char_img: np.ndarray) -> str | None:
     """通过精确像素模式匹配识别 0-9 和 /"""
@@ -204,34 +221,35 @@ def _classify_digit(char_img: np.ndarray) -> str | None:
     else:
         white_resized = white
 
-    # 与字模逐个对比（允许不同宽度匹配）
+    # 与字模逐个对比（允许不同宽度匹配；主模板+备选模板取最高分）
     best_char = None
     best_score = -1.0
     for ch, pattern in _PIXEL_FONT_5x7.items():
-        template = np.array([[p == '#' for p in row] for row in pattern], dtype=bool)
-        # 尺寸不匹配：尝试裁剪或填充到模板尺寸
-        th, tw = template.shape
-        rh, rw = white_resized.shape
-        if rh != th:
-            continue
-        if rw == tw:
-            cmp = white_resized
-        elif rw < tw:
-            # 输入窄：居中补白
-            pad = tw - rw
-            left_pad = pad // 2
-            right_pad = pad - left_pad
-            cmp = np.pad(white_resized, ((0, 0), (left_pad, right_pad)),
-                         constant_values=False)
-        else:
-            # 输入宽：从两侧各裁一半（`/` 7 列对应模板 5 列时裁掉两侧）
-            excess = rw - tw
-            left_trim = excess // 2
-            cmp = white_resized[:, left_trim:left_trim + tw]
-        score = (template == cmp).sum() / template.size
-        if score > best_score:
-            best_score = score
-            best_char = ch
+        for pat in [pattern] + _PIXEL_FONT_5x7_ALT.get(ch, []):
+            template = np.array([[p == '#' for p in row] for row in pat], dtype=bool)
+            # 尺寸不匹配：尝试裁剪或填充到模板尺寸
+            th, tw = template.shape
+            rh, rw = white_resized.shape
+            if rh != th:
+                continue
+            if rw == tw:
+                cmp = white_resized
+            elif rw < tw:
+                # 输入窄：居中补白
+                pad = tw - rw
+                left_pad = pad // 2
+                right_pad = pad - left_pad
+                cmp = np.pad(white_resized, ((0, 0), (left_pad, right_pad)),
+                             constant_values=False)
+            else:
+                # 输入宽：从两侧各裁一半（`/` 7 列对应模板 5 列时裁掉两侧）
+                excess = rw - tw
+                left_trim = excess // 2
+                cmp = white_resized[:, left_trim:left_trim + tw]
+            score = (template == cmp).sum() / template.size
+            if score > best_score:
+                best_score = score
+                best_char = ch
 
     if best_score < 0.7:
         return None

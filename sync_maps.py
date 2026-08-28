@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DEV_DIR = ROOT / "脚本开发工具"
 MARKER_OUT = DEV_DIR / "地图标记工具" / "marker_output"
-YOLO_MODELS = DEV_DIR / "YOLO训练工具" / "trained_models"
+YOLO_MODELS = DEV_DIR / "YOLO自动标注工具" / "trained_models"
 TARGET_DIR = ROOT / "自动脚本开发" / "maps"
 
 
@@ -48,6 +48,16 @@ def discover_window_maps() -> dict[str, list[str]]:
         if maps:
             result[win_dir.name] = maps
     return result
+
+
+def latest_model() -> Path | None:
+    """返回 trained_models/ 下最新版本的 v{N}.pt（N 最大）。"""
+    if not YOLO_MODELS.is_dir():
+        return None
+    versions = [f for f in YOLO_MODELS.glob("v*.pt") if f.stem[1:].isdigit()]
+    if not versions:
+        return None
+    return max(versions, key=lambda f: int(f.stem[1:]))
 
 
 def sync_one(win_name: str, map_name: str) -> int:
@@ -89,15 +99,25 @@ def sync_one(win_name: str, map_name: str) -> int:
     else:
         print(f"   ⚠ {map_name}_model.json 不存在")
 
-    # 3. best.pt
+    # 3. 专属 best.pt（标注工具无按地图模型，通常为空，由全局兜底模型代替）
     pt_src = YOLO_MODELS / map_name / "best.pt"
     pt_dst = map_dir / "best.pt"
     if pt_src.exists():
         shutil.copy2(pt_src, pt_dst)
         synced += 1
-        print(f"   ✓ best.pt")
+        print(f"   ✓ best.pt (专属)")
     else:
-        print(f"   - 无专属 best.pt")
+        print(f"   - 无专属 best.pt（使用全局兜底模型 maps/best.pt）")
+
+    # 3b. 完整小地图（局部滚动定位参考图，可选）
+    mm_src = src_base / f"{map_name}_minimap_full.png"
+    mm_dst = map_dir / "minimap_full.png"
+    if mm_src.exists():
+        shutil.copy2(mm_src, mm_dst)
+        synced += 1
+        print(f"   ✓ minimap_full.png (完整小地图)")
+    else:
+        print(f"   - 无完整小地图（自动脚本将使用黄点整图定位）")
 
     # 4. config.json（只创建，不覆盖）
     config_dst = map_dir / "config.json"
@@ -159,6 +179,21 @@ def main():
         shutil.copy2(ss_src, ss_dst)
         total += 1
         print(f"\n[全局] ✓ system_setting.json")
+
+    # 同步全局 YOLO 模型（标注工具最新训练版本 → maps/best.pt 兜底模型）
+    model = latest_model()
+    if model is not None:
+        dst = TARGET_DIR / "best.pt"
+        shutil.copy2(model, dst)
+        total += 1
+        print(f"[全局] ✓ best.pt ← {model.name}（标注工具最新训练模型）")
+        onnx = model.with_suffix(".onnx")
+        if onnx.exists():
+            shutil.copy2(onnx, dst.with_suffix(".onnx"))
+            total += 1
+            print(f"[全局] ✓ best.onnx ← {onnx.name}")
+    else:
+        print("\n[全局] ⚠ 未找到标注工具 trained_models/v{N}.pt，跳过模型同步")
 
     print(f"\n完成！共同步 {total} 个文件。")
 

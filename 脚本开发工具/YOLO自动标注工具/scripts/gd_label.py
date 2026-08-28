@@ -27,8 +27,8 @@ def main():
                         help="HuggingFace 模型ID: base(~700M) 或 tiny(~170M)")
     parser.add_argument("--device", default="auto",
                         help="设备: auto (自动检测) / cpu / cuda")
-    parser.add_argument("--img-width", type=int, default=1280, help="图片宽度")
-    parser.add_argument("--img-height", type=int, default=720, help="图片高度")
+    parser.add_argument("--img-width", type=int, default=1366, help="图片宽度")
+    parser.add_argument("--img-height", type=int, default=768, help="图片高度")
 
     args = parser.parse_args()
 

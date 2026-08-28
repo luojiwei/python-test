@@ -16,7 +16,8 @@ from PySide6.QtCore import Qt, Signal, QObject
 from config import (PROJECT_DIR, SCREENSHOTS_DIR, DATASET_DIR, IMAGES_TRAIN_DIR,
                     IMAGES_VAL_DIR, LABELS_TRAIN_DIR, LABELS_VAL_DIR, DATA_YAML,
                     OUTPUTS_DIR, MODELS_DIR, SCRIPTS_DIR, YOLO_PYTHON, TARGET_W, TARGET_H,
-                    load_reviewed_stems, save_reviewed_stems, save_review_round,
+                    load_reviewed_stems, save_reviewed_stems, load_trained_stems,
+                    mark_reviewed_as_trained,
                     get_available_models)
 from review_dialog import ReviewDialog
 from gpu_utils import detect_gpu, get_device_list, resolve_device, get_gpu_status_text
@@ -73,8 +74,8 @@ class YOLOTab(QObject):
         info = QGroupBox("阶段说明")
         info_layout = QVBoxLayout(info)
         info_layout.addWidget(QLabel(
-            "用已审核的标注训练 YOLO，然后用 YOLO 自动标注新图片。\n"
-            "高置信度(>0.8)自动通过，低置信度弹窗审核。每 500 张重训一轮。"))
+            "用已训练 + 已审核的标注全量训练 YOLO，训练后归档到历史审核。\n"
+            "再用 YOLO 自动标注新增图片（已训练图片沿用旧标注，不重复标注）。"))
         layout.addWidget(info)
 
         # GPU 状态显示 + 设备选择
@@ -264,23 +265,25 @@ class YOLOTab(QObject):
         LABELS_TRAIN_DIR.mkdir(parents=True, exist_ok=True)
         LABELS_VAL_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 只同步已审查过的图片，80/20 划分 train/val
+        # 同步已训练（历史审核）+ 已审核（待训练）的全部图片，80/20 划分 train/val
         reviewed = load_reviewed_stems()
-        if reviewed:
+        trained = load_trained_stems()
+        all_stems = trained | reviewed
+        if all_stems:
             # 清空旧文件
             for d in [IMAGES_TRAIN_DIR, IMAGES_VAL_DIR, LABELS_VAL_DIR]:
                 for old in d.glob("*"):
                     old.unlink()
-            # 收集所有已审查的截图
+            # 收集所有已标注的截图
             import random, shutil
-            reviewed_images = []
+            all_images = []
             for f in SCREENSHOTS_DIR.glob("*"):
-                if f.suffix.lower() in (".png", ".jpg", ".jpeg") and f.stem in reviewed:
-                    reviewed_images.append(f)
-            random.shuffle(reviewed_images)
-            split = int(len(reviewed_images) * 0.8)
-            train_imgs = reviewed_images[:split]
-            val_imgs = reviewed_images[split:]
+                if f.suffix.lower() in (".png", ".jpg", ".jpeg") and f.stem in all_stems:
+                    all_images.append(f)
+            random.shuffle(all_images)
+            split = int(len(all_images) * 0.8)
+            train_imgs = all_images[:split]
+            val_imgs = all_images[split:]
             for img in train_imgs:
                 shutil.copy2(str(img), str(IMAGES_TRAIN_DIR / img.name))
             for img in val_imgs:
@@ -289,9 +292,10 @@ class YOLOTab(QObject):
                 label_path = LABELS_TRAIN_DIR / f"{img.stem}.txt"
                 if label_path.exists():
                     shutil.copy2(str(label_path), str(LABELS_VAL_DIR / label_path.name))
-            self._log_yolo(f"数据集: train={len(train_imgs)} val={len(val_imgs)} (共 {len(reviewed)} 张已审核)")
+            self._log_yolo(f"数据集: train={len(train_imgs)} val={len(val_imgs)} "
+                           f"(历史 {len(trained)} + 已审核 {len(reviewed)} = 共 {len(all_stems)} 张)")
         else:
-            self._log_yolo("警告: 没有已审查图片，训练集可能为空！")
+            self._log_yolo("警告: 没有已训练或已审核图片，训练集可能为空！")
 
         classes = [line.strip() for line in
                    self._yolo_classes_text.toPlainText().split("\n")
@@ -318,15 +322,17 @@ names:"""
         # 检查未审核标注
         labeled = {f.stem for f in LABELS_TRAIN_DIR.glob("*.txt")}
         reviewed = load_reviewed_stems()
-        unreviewed_labels = labeled - reviewed
+        trained = load_trained_stems()
+        all_stems = trained | reviewed
+        unreviewed_labels = labeled - all_stems
         if unreviewed_labels:
             QMessageBox.warning(self.app, "警告",
                 f"有 {len(unreviewed_labels)} 张图片已标注但未审核！\n"
-                f"训练只会使用已审核的 {len(reviewed)} 张。\n"
+                f"训练只会使用已训练 {len(trained)} 张 + 已审核 {len(reviewed)} 张。\n"
                 f"未审核的数据不会参与训练。")
             self._log_yolo(f"⚠ 跳过 {len(unreviewed_labels)} 张未审核标注")
-        if not reviewed:
-            QMessageBox.critical(self.app, "错误", "没有已审核的图片，无法训练")
+        if not all_stems:
+            QMessageBox.critical(self.app, "错误", "没有已训练或已审核的图片，无法训练")
             return
 
         yaml_path = self.generate_data_yaml()
@@ -372,6 +378,10 @@ names:"""
                 for line in proc.stdout:
                     self.log_signal.emit(line.rstrip())
                 proc.wait()
+                if proc.returncode != 0:
+                    self.log_signal.emit("=== 训练失败（返回码非 0），不归档已审核图片 ===")
+                    self.status_signal.emit("训练失败")
+                    return
                 self.log_signal.emit("=== 训练完成 ===")
 
                 # 2. 自动验证 (找最新的 v{N}.pt)
@@ -406,7 +416,13 @@ names:"""
                             recall_line = line
                     vproc.wait()
                     _save_metrics(latest, map50_line, precision_line, recall_line,
-                                  len(reviewed), self._yolo_epochs_var.text())
+                                  len(all_stems), self._yolo_epochs_var.text())
+
+                # 3. 训练结束：把已审核（待训练）图片归档为已训练（历史审核）
+                moved = mark_reviewed_as_trained()
+                self.log_signal.emit(
+                    f"=== 已训练标记已记录: {moved} 张已审核图片 → 历史审核（累计 {len(load_trained_stems())} 张）===")
+                self.refresh_signal.emit()
 
                 self.status_signal.emit(f"训练完成")
             except Exception as e:
@@ -559,19 +575,22 @@ print('OK')
         threading.Thread(target=run, daemon=True).start()
 
     def _review_yolo_batch(self, images: list[Path]) -> None:
-        # 传入全部图片 + 已审查集合，弹窗内部分屏显示
-        reviewed = load_reviewed_stems()
-        unreviewed_count = len([img for img in images if img.stem not in reviewed])
+        # 传入全部截图 + 已审核/已训练集合，弹窗内部分屏显示（历史审核 = 已训练）
+        out_dir = self._get_screenshot_dir()
+        all_images = sorted([f for f in out_dir.iterdir()
+                             if f.suffix.lower() in (".png", ".jpg", ".jpeg")])
+        reviewed = load_reviewed_stems() | load_trained_stems()
+        unreviewed_count = len([img for img in all_images if img.stem not in reviewed])
         if unreviewed_count == 0:
-            self._log_yolo(f"全部 {len(images)} 张已审查，可切换「已审查」查看")
+            self._log_yolo(f"全部 {len(all_images)} 张已处理，可切换「历史审核」查看已训练图片")
 
         def on_reviewed(stems: set[str]):
+            # 新标注只放入已审核（待训练），不放历史审核
             if stems:
                 save_reviewed_stems(stems)
-                save_review_round(stems)
             self.app._refresh_pool_stats()
 
-        dialog = ReviewDialog(self.app, images, LABELS_TRAIN_DIR, LABELS_VAL_DIR,
+        dialog = ReviewDialog(self.app, all_images, LABELS_TRAIN_DIR, LABELS_VAL_DIR,
                               on_close=on_reviewed, reviewed_stems=reviewed)
         dialog.exec()
 

@@ -1,7 +1,7 @@
 """map_loader.py — 地图资源统一加载器。
 
-将 start() 中 ~120 行的分散加载逻辑集中为一个 MapLoader 类。
-负责：配置解析 → 世界模型 → 巡逻路线 → YOLO → 角色模板。
+将 start() 中分散加载逻辑集中为一个 MapLoader 类。
+负责：配置解析 → 世界模型 → 巡逻路线 → YOLO（含类别/怪物标签同步）→ 角色名。
 返回 LoadResult dataclass，main.py 只需一行 loader.load(name)。
 """
 
@@ -10,9 +10,10 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import numpy as np
 
-from config import PROJECT_DIR, SEARCH_BOTTOM_SKIP_PCT, validate_map_resources
+from config import PROJECT_DIR, validate_map_resources
 
 
 def _safe(name: str) -> str:
@@ -20,7 +21,6 @@ def _safe(name: str) -> str:
     for ch in '<>:"/\\|?*':
         name = name.replace(ch, '_')
     return name
-from input_utils import capture_frame, force_foreground
 from perception import move_model_to_device
 from world_model import WorldModel, load_world_model
 
@@ -30,8 +30,6 @@ class LoadResult:
     """MapLoader 的一次性加载结果。"""
     world_model: WorldModel
     yolo_model: object          # ultralytics.YOLO
-    template: np.ndarray        # 角色名模板图像
-    search_region: tuple[int, int, int, int]  # (x, y, w, h)
     map_cfg: dict               # config.json 原始数据
     dot_hsv_lower: np.ndarray = field(default_factory=lambda: np.array([25, 100, 180]))
     dot_hsv_upper: np.ndarray = field(default_factory=lambda: np.array([35, 255, 255]))
@@ -43,6 +41,8 @@ class LoadResult:
     patrol_return_methods: list[str] = field(default_factory=list)
     patrol_return_method: str = "一直走"
     mm_region: tuple[int, int, int, int] = (0, 0, 0, 0)
+    minimap_full: np.ndarray | None = None   # 拼接完整小地图（局部滚动定位用）
+    minimap_size: tuple[int, int] = (0, 0)   # 世界模型完整小地图尺寸 (w, h)
 
 
 class MapLoader:
@@ -94,11 +94,10 @@ class MapLoader:
         with open(config_path, "r", encoding="utf-8") as f:
             map_cfg = json.load(f)
 
-        template_rect = MapLoader._resolve_template_rect(map_dir, target_hwnd)
         mm_region = tuple(map_cfg.get("mm_region", [8, 97, 128, 208]))
 
         # 黄点 HSV（从 system_setting.json 按窗口名读取）
-        dot_lower, dot_upper, hp_rect, mp_rect, marked_search_region = MapLoader._resolve_system_settings(map_dir, target_hwnd)
+        dot_lower, dot_upper, hp_rect, mp_rect, _marked_search_region = MapLoader._resolve_system_settings(map_dir, target_hwnd)
 
         # 2. 世界模型
         self._status(f"加载世界模型 [{map_name}]...")
@@ -106,6 +105,27 @@ class MapLoader:
         wm = load_world_model(wm_path)
         wm.mm_region = list(mm_region)
         self._log(f"世界模型: {len(wm.platforms)} 平台, {len(wm.edges)} 边")
+
+        # 2b. 拼接完整小地图（局部滚动定位参考图，可选）
+        minimap_full = None
+        minimap_size = (0, 0)
+        full_path = map_dir / "minimap_full.png"
+        if full_path.exists():
+            try:
+                data = np.fromfile(str(full_path), dtype=np.uint8)
+                minimap_full = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            except Exception:
+                minimap_full = None
+        if minimap_full is not None:
+            try:
+                raw_wm = json.loads(wm_path.read_text(encoding="utf-8"))
+                ms = raw_wm.get("minimap_size", [])
+                if len(ms) == 2:
+                    minimap_size = (int(ms[0]), int(ms[1]))
+            except Exception:
+                pass
+            self._log(f"完整小地图: {minimap_full.shape[1]}x{minimap_full.shape[0]}"
+                      f" 世界尺寸={minimap_size}（局部滚动定位模式）")
 
         # 3. 巡逻路线
         patrol_names, patrol_routes, patrol_return_methods = self._load_patrol_routes(map_name, map_dir)
@@ -137,55 +157,12 @@ class MapLoader:
         elif hasattr(yolo_model.model, 'names'):
             cfg.CLASS_NAMES.clear()
             cfg.CLASS_NAMES.update(yolo_model.model.names)
-        self._log(f"YOLO: {len(cfg.CLASS_NAMES)}类  黑名单={cfg.NON_MONSTER_NAMES}")
+        self._log(f"YOLO: {len(cfg.CLASS_NAMES)}类  怪物类型标签={cfg.MONSTER_CLASS_NAMES}  玩家类别={cfg.PLAYER_CLASS_NAME}")
         move_model_to_device(yolo_model)
-
-        # 5. 角色模板
-        self._status("截取角色名模板...")
-        try:
-            force_foreground(target_hwnd)
-        except Exception:
-            pass
-        import time
-        time.sleep(0.4)
-        frame = capture_frame(target_hwnd)
-        if frame is None:
-            raise RuntimeError("截图失败，无法截取角色名模板")
-
-        tx, ty, tr, tb = template_rect
-        # 边界检查：坐标必须在帧范围内
-        frame_h, frame_w = frame.shape[:2]
-        if ty < 0 or tb > frame_h or tx < 0 or tr > frame_w or tb <= ty or tr <= tx:
-            self._log(f"模板坐标越界 rect={list(template_rect)} frame=({frame_w},{frame_h})，回退默认值")
-            tx, ty, tr, tb = (85, 728, 150, 745)
-            template_rect = (tx, ty, tr, tb)
-        template = frame[ty:tb, tx:tr]
-        th, tw = template.shape[:2]
-        if th <= 0 or tw <= 0:
-            self._log(f"模板区域为空 rect={list(template_rect)} frame=({frame_w},{frame_h})，回退默认值")
-            tx, ty, tr, tb = (85, 728, 150, 745)
-            template_rect = (tx, ty, tr, tb)
-            template = frame[ty:tb, tx:tr]
-        # 搜索范围：优先用标注值，兜底计算值
-        skip_px = int(frame_h * SEARCH_BOTTOM_SKIP_PCT)
-        if marked_search_region:
-            search_region = marked_search_region
-            self._log(f"搜索范围(标注): ({search_region[0]},{search_region[1]})-({search_region[2]},{search_region[3]})")
-        else:
-            search_region = (0, 0, frame_w, frame_h - skip_px)
-        self._log(f"模板: ({tx},{ty})->({tr},{tb})  skip={skip_px}px")
-
-        try:
-            force_foreground(target_hwnd)
-        except Exception:
-            pass
-        time.sleep(0.3)
 
         return LoadResult(
             world_model=wm,
             yolo_model=yolo_model,
-            template=template,
-            search_region=search_region,
             map_cfg=map_cfg,
             dot_hsv_lower=dot_lower,
             dot_hsv_upper=dot_upper,
@@ -197,57 +174,9 @@ class MapLoader:
             patrol_return_methods=patrol_return_methods,
             patrol_return_method=patrol_return_method,
             mm_region=mm_region,
+            minimap_full=minimap_full,
+            minimap_size=minimap_size,
         )
-
-    @staticmethod
-    def _resolve_template_rect(map_dir: Path,
-                                target_hwnd: int) -> tuple[int, int, int, int]:
-        """按窗口名从 system_setting.json 读取模板区域。
-
-        数据格式（新）: {窗口标题: {template_rect: [x1,y1,x2,y2], window_size: [w,h]}}
-        兼容旧格式:    {窗口标题: [x1,y1,x2,y2]}
-        优先级: system_setting.json[窗口标题].template_rect
-                > system_setting.json["_default"].template_rect
-                > 回退默认值 [85, 728, 150, 745]
-        """
-        default_rect = (85, 728, 150, 745)
-
-        ss_path = map_dir.parent.parent / "system_setting.json"
-        if not ss_path.exists():
-            return default_rect
-
-        try:
-            with open(ss_path, "r", encoding="utf-8") as f:
-                ss_data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return default_rect
-
-        # 获取窗口标题
-        try:
-            buf = ctypes.create_unicode_buffer(256)
-            ctypes.windll.user32.GetWindowTextW(target_hwnd, buf, 256)
-            win_title = buf.value.strip()
-        except Exception:
-            win_title = ""
-
-        def _extract_rect(entry) -> list | None:
-            if isinstance(entry, dict):
-                return entry.get("template_rect")
-            if isinstance(entry, list) and len(entry) == 4:
-                return entry
-            return None
-
-        # 按窗口名查找
-        if win_title and win_title in ss_data:
-            rect = _extract_rect(ss_data[win_title])
-            if rect:
-                return tuple(rect)
-        # 回退到 _default
-        if "_default" in ss_data:
-            rect = _extract_rect(ss_data["_default"])
-            if rect:
-                return tuple(rect)
-        return default_rect
 
     @staticmethod
     def _resolve_system_settings(map_dir: Path,

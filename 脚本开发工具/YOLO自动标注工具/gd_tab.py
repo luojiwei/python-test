@@ -15,7 +15,7 @@ from PySide6.QtCore import Qt, Signal, QObject
 
 from config import (SCREENSHOTS_DIR, LABELS_TRAIN_DIR, LABELS_VAL_DIR,
                     IMAGES_TRAIN_DIR, IMAGES_VAL_DIR, SCRIPTS_DIR, YOLO_PYTHON,
-                    load_reviewed_stems, save_reviewed_stems, save_review_round,
+                    load_reviewed_stems, save_reviewed_stems, load_trained_stems,
                     get_available_models)
 from review_dialog import ReviewDialog
 
@@ -114,6 +114,7 @@ class GDTab(QObject):
             str(YOLO_PYTHON), str(label_script),
             str(out_dir), str(LABELS_TRAIN_DIR),
             "--device", "auto",
+            "--skip-existing",  # 已有标注（历史审核/已审核）的图片不重新标注
         ]
         model_path = self._gd_model_combo.currentData()
         if model_path:
@@ -133,7 +134,8 @@ class GDTab(QObject):
                 self.log_signal.emit(f"GD 标注完成: {len(batch)} 张")
                 self.status_signal.emit(f"完成 {len(batch)} 张，可开始审核")
                 self.refresh_signal.emit()
-                self.review_signal.emit(batch)
+                # 传全量截图：审核弹窗可按 待审查/已审核/历史审核 分屏查看
+                self.review_signal.emit(images)
             except FileNotFoundError:
                 self.log_signal.emit(f"错误: Python 环境不可用 {YOLO_PYTHON}")
                 self.status_signal.emit("环境错误")
@@ -178,20 +180,20 @@ class GDTab(QObject):
         self._review_batch(batch)
 
     def _review_batch(self, images: list[Path]) -> None:
-        # 传入全部图片 + 已审查集合，弹窗内部分屏显示
-        reviewed = load_reviewed_stems()
+        # 传入全部图片 + 已审核/已训练集合，弹窗内部分屏显示
+        reviewed = load_reviewed_stems() | load_trained_stems()
         unreviewed_count = len([img for img in images if img.stem not in reviewed])
         if unreviewed_count == 0 and not images:
             QMessageBox.information(self.app, "提示", "没有待审查的新图片")
             return
         elif unreviewed_count == 0:
-            self._log_gd(f"全部 {len(images)} 张已审查，可切换「已审查」查看")
+            self._log_gd(f"全部 {len(images)} 张已处理，可切换「历史审核」查看")
 
         def on_reviewed(stems: set[str]):
+            # 新标注只放入已审核（待训练），不放历史审核
             if stems:
                 save_reviewed_stems(stems)
-                round_num = save_review_round(stems)
-                self._log_gd(f"已审查: {len(stems)} 张 → 轮次 {round_num}, 缓存已更新")
+                self._log_gd(f"已审核: {len(stems)} 张 → 缓存已更新")
             self.app._refresh_pool_stats()
 
         dialog = ReviewDialog(self.app, images, LABELS_TRAIN_DIR, LABELS_VAL_DIR,

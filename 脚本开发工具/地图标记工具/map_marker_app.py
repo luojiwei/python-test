@@ -32,6 +32,8 @@ try:
         draw_rope_preview,
     )
     from .markers import FlashMixin, JumpMixin, PlatformMixin, RopeMixin
+    from .minimap_stitch_dialog import (compute_world_pos, load_full_minimap,
+                                         locate_in_full_map, open_minimap_stitch)
     from .model_generator import open_model_generator
     from .patrol_route_editor import open_patrol_route_editor
     from .player_detection import PlayerTracker, detect_player_dot
@@ -59,6 +61,12 @@ except ImportError:
         draw_rope_preview,
     )
     from markers import FlashMixin, JumpMixin, PlatformMixin, RopeMixin  # type: ignore[no-redef]
+    from minimap_stitch_dialog import (  # type: ignore[no-redef]
+        compute_world_pos,
+        load_full_minimap,
+        locate_in_full_map,
+        open_minimap_stitch,
+    )
     from model_generator import open_model_generator  # type: ignore[no-redef]
     from patrol_route_editor import open_patrol_route_editor  # type: ignore[no-redef]
     from player_detection import PlayerTracker, detect_player_dot  # type: ignore[no-redef]
@@ -86,10 +94,14 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
         self.jump_detector = JumpDetector()
         self.flash_detector = FlashDetector()
         self.frame_count = 0
-        self._mm_snapshot = None  # PIL Image, 小地图背景缓存
+        self._mm_snapshot = None  # PIL Image, 小地图背景缓存（优先完整小地图）
+        self._full_minimap_np = None  # 完整小地图内容区 BGR（用于在线定位），无则为 None
+        self._full_trim = 0  # 完整小地图裁边量（与拼接一致）
+        self._full_minimap_stale = False  # 重新框选后旧完整图失效，需重新合成
         self.status_text = tk.StringVar(value="请输入地图名称并点击确定")
         self.mm_offsets = (0, 0, 0, 0)
         self.mm_size = (0, 0)
+        self.mode_buttons: dict = {}  # 先初始化，GUI 各按钮随后注册
         self.map_confirmed = False
         self.minimap_marked = False
         self._mode = None
@@ -154,20 +166,25 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
         self.mm_bottom_var = tk.StringVar(value="")
         tk.Entry(f_mmc, textvariable=self.mm_bottom_var, width=5,
                  font=("Courier", 10)).pack(side="left", padx=2)
+        # 小地图标记按钮（缩小，跟在坐标后面）
+        btn_mm_small = tk.Button(f_mmc, text="标记", font=("Microsoft YaHei", 9),
+                                 width=4, height=1, bg="#3498db", fg="white",
+                                 activebackground="#2980b9", relief="flat", cursor="hand2",
+                                 command=self._on_minimap_mark)
+        btn_mm_small.pack(side="left", padx=(4, 0))
+        self.mode_buttons["minimap"] = btn_mm_small
 
         # ---- 分隔 ----
         tk.Frame(root, height=1, bg="#ccc").pack(fill="x", padx=20, pady=6)
 
-        # ---- Row 6: 小地图标记 查看标记 世界模型 巡逻路线 ----
-        self.mode_buttons = {}
+        # ---- Row 6: 小地图合成 查看标记 世界模型 巡逻路线 ----
         f_tools = tk.Frame(root)
         f_tools.pack(pady=3)
-        btn_mm = tk.Button(f_tools, text="小地图标记", font=("Microsoft YaHei", 10, "bold"),
-                           width=12, height=1, bg="#3498db", fg="white",
-                           activebackground="#2980b9", relief="flat", cursor="hand2",
-                           command=self._on_minimap_mark)
-        btn_mm.pack(side="left", padx=2)
-        self.mode_buttons["minimap"] = btn_mm
+        btn_mms = tk.Button(f_tools, text="小地图合成", font=("Microsoft YaHei", 10, "bold"),
+                            width=12, height=1, bg="#16a085", fg="white",
+                            activebackground="#117864", relief="flat", cursor="hand2",
+                            command=lambda: open_minimap_stitch(self))
+        btn_mms.pack(side="left", padx=2)
 
         btn_view = tk.Button(f_tools, text="查看标记", font=("Microsoft YaHei", 10, "bold"),
                              width=12, height=1, bg="#27ae60", fg="white",
@@ -190,15 +207,9 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
         btn_patrol.pack(side="left", padx=2)
         self.mode_buttons["patrol"] = btn_patrol
 
-        # ---- Row 7: 模板标记 ----
+        # ---- Row 7: HP/MP / 搜索范围 ----
         f_tmpl = tk.Frame(root)
         f_tmpl.pack(pady=1)
-        btn_template = tk.Button(f_tmpl, text="模板标记", font=("Microsoft YaHei", 10, "bold"),
-                                 width=12, height=1, bg="#2c3e50", fg="white",
-                                 activebackground="#1a252f", relief="flat", cursor="hand2",
-                                 command=self._on_template_mark)
-        btn_template.pack(side="left", padx=2)
-        self.mode_buttons["template"] = btn_template
 
         btn_hpmp = tk.Button(f_tmpl, text="HP/MP标记", font=("Microsoft YaHei", 10, "bold"),
                              width=12, height=1, bg="#7f8c8d", fg="white",
@@ -424,11 +435,15 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
     def _ensure_mm_snapshot(self) -> None:
         """确保小地图背景截图已缓存，用于查看/模型/巡逻功能。
 
-        仅在 _mm_snapshot 为 None 时截取一次。
+        优先加载该地图的完整小地图（已通过"小地图合成"保存）；没有时
+        回退为实时截取局部小地图（整图模式/未合成地图）。
+        仅在 _mm_snapshot 为 None 时加载一次。
         """
         if self._mm_snapshot is not None:
             return
         if self.target_hwnd is None:
+            return
+        if self._try_load_full_minimap():
             return
         ml, mt, mr, mb = self.mm_offsets
         mw, mh = mr - ml, mb - mt
@@ -442,6 +457,44 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
             self._mm_snapshot = Image.fromarray(mm[:, :, ::-1])
         except Exception:
             pass
+
+    def _try_load_full_minimap(self) -> bool:
+        """尝试加载该地图的完整小地图作为标记背景。
+
+        成功时更新 _mm_snapshot（完整框背景）与 mm_size（完整框尺寸），
+        并缓存内容区 ndarray 供在线定位。返回是否成功。
+        """
+        if self._full_minimap_stale:
+            return False  # 重新框选后旧完整图失效，需重新合成
+        win_name = self._window_var.get().strip()
+        map_name = self.map_name_var.get().strip()
+        if not win_name or not map_name:
+            return False
+        info = load_full_minimap(win_name, map_name)
+        if info is None:
+            return False
+        self._full_minimap_np = info["content"]
+        self._full_trim = info["trim"]
+        self._mm_snapshot = info["full_pil"]
+        self.mm_size = info["world_size"]
+        return True
+
+    def _to_world_pos(self, mm, pos):
+        """局部小地图内黄点坐标 → 世界坐标（完整小地图框坐标系）。
+
+        mm: 当前帧局部小地图（BGR 原图，含边框）
+        pos: detect_player_dot 返回的黄点局部坐标 (x, y)
+
+        Returns:
+            (world_x, world_y) 世界坐标；定位失败返回 None（调用方应丢弃该帧）。
+            无完整小地图（整图模式）时直接返回原坐标。
+        """
+        if self._full_minimap_np is None:
+            return float(pos[0]), float(pos[1])
+        loc = locate_in_full_map(mm, self._full_minimap_np, trim=self._full_trim)
+        if loc is None:
+            return None
+        return compute_world_pos(pos, loc, trim=self._full_trim)
 
     def _load_map_config(self, map_name):
         """从 {窗口名}/{地图名}_maps.json 读取配置，不存在返回 None。"""
@@ -515,6 +568,8 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
                 jumps = config.get("jumps", [])
                 flash_points = config.get("flash_points", [])
                 parts = [f"已加载 '{map_name}' 配置"]
+                if self._try_load_full_minimap():
+                    parts.append(f"完整小地图 {self.mm_size[0]}x{self.mm_size[1]}")
                 if ropes: parts.append(f"{len(ropes)}条绳梯")
                 if platforms: parts.append(f"{len(platforms)}平台")
                 if jumps: parts.append(f"{len(jumps)}跳跃点")
@@ -530,6 +585,10 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
             self.map_confirmed = False
             self.minimap_marked = False
             self._clear_mm_coords()
+            self._mm_snapshot = None
+            self._full_minimap_np = None
+            self._full_trim = 0
+            self._full_minimap_stale = False
             self.map_name_combo.config(state="normal")
             self.confirm_btn.config(text="确定")
             self.status_text.set("请选择或输入地图名称")
@@ -578,84 +637,14 @@ class MapMarkerApp(PlatformMixin, RopeMixin, JumpMixin, FlashMixin):
         self.mm_bottom_var.set(str(y2))
         self.mm_offsets = (x1, y1, x2, y2)
         self.mm_size = (x2 - x1, y2 - y1)
+        # 框选位置改变 → 旧完整小地图失效，重置缓存（需重新合成后再使用）
+        self._mm_snapshot = None
+        self._full_minimap_np = None
+        self._full_trim = 0
+        self._full_minimap_stale = True
 
         self.minimap_marked = True
         self.status_text.set(f"已框选小地图(客户区坐标): ({x1},{y1})-({x2},{y2}) {rw}x{rh}px")
-
-    # ==================== 1b. Template marking (角色名模板) ====================
-
-    def _on_template_mark(self):
-        """标记角色名模板区域，按窗口名保存到 system_setting.json。"""
-        if self.running:
-            return
-        if self.target_hwnd is None:
-            self.status_text.set("请先选择游戏窗口")
-            return
-
-        # 获取当前窗口完整标题
-        win_title = self._window_var.get().strip()
-        if not win_title:
-            self.status_text.set("无法获取窗口标题")
-            return
-
-        img = capture_client(self.target_hwnd)
-        if img is None:
-            self.status_text.set("截图失败")
-            return
-
-        win_h, win_w = img.shape[:2]
-
-        # 缩放显示
-        max_dim = max(img.shape[:2])
-        scale = max(1.2, min(2.0, 1600.0 / max_dim))
-        interp = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_LINEAR
-        disp = cv2.resize(img, None, fx=scale, fy=scale, interpolation=interp)
-
-        cv2.namedWindow("Drag to select character name area, then press ENTER",
-                        cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Drag to select character name area, then press ENTER",
-                         disp.shape[1], disp.shape[0] + 30)
-        roi = cv2.selectROI("Drag to select character name area, then press ENTER",
-                            disp, False)
-        cv2.destroyAllWindows()
-
-        if roi[2] == 0 or roi[3] == 0:
-            self.status_text.set("已取消模板框选")
-            return
-
-        rx, ry, rw, rh = roi
-        x1 = int(rx / scale)
-        y1 = int(ry / scale)
-        x2 = x1 + int(rw / scale)
-        y2 = y1 + int(rh / scale)
-        rect_data = [x1, y1, x2, y2]
-
-        # 保存到 system_setting.json（嵌套结构）
-        settings = {}
-        if SYSTEM_SETTINGS_FILE.exists():
-            try:
-                with open(SYSTEM_SETTINGS_FILE, "r", encoding="utf-8") as f:
-                    settings = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        # 合并更新：保留已有字段，只更新 template_rect 和 window_size
-        entry = settings.get(win_title, {})
-        if not isinstance(entry, dict):
-            # 兼容旧格式（直接是数组）
-            entry = {}
-        entry["template_rect"] = rect_data
-        entry["window_size"] = [win_w, win_h]
-        settings[win_title] = entry
-
-        SYSTEM_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(SYSTEM_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
-
-        self.status_text.set(
-            f"已标记模板 [{win_title[:25]}]: ({x1},{y1})-({x2},{y2}) {rw}x{rh}px"
-            f"  窗口 {win_w}x{win_h} → {SYSTEM_SETTINGS_FILE.name}"
-        )
 
     def _on_hpmp_mark(self):
         """框选 HP 和 MP 文字区域，存入 system_setting.json。"""

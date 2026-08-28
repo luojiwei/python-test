@@ -42,11 +42,12 @@ class JumpMixin:
         mr: int = int(self.mm_right_var.get())
         mb: int = int(self.mm_bottom_var.get())
         self.mm_offsets = (ml, mt, mr, mb)
-        self.mm_size = (mr - ml, mb - mt)
+        if self._full_minimap_np is None:
+            self.mm_size = (mr - ml, mb - mt)
+        self._ensure_mm_snapshot()  # 有完整小地图时 mm_size/背景切换为完整口径
         self.status_text.set(f"跳跃点标记中... (地图: {map_name})")
         self.jump_detector.reset()
         self.player_tracker = PlayerTracker()
-        self._mm_snapshot = None
         self.frame_count = 0
         self.running = True
         self._mode = "jump"
@@ -92,7 +93,10 @@ class JumpMixin:
                 if self._mm_snapshot is None:
                     self._mm_snapshot = Image.fromarray(mm[:, :, ::-1])
                 pos = detect_player_dot(mm, self.player_tracker)
-                if pos is not None: self.jump_detector.add(pos[0], pos[1])
+                if pos is not None:
+                    wp = self._to_world_pos(mm, pos)
+                    if wp is not None:
+                        self.jump_detector.add(wp[0], wp[1])
                 self.frame_count += 1
                 now: float = time.time()
                 if now - last_status > 0.5:

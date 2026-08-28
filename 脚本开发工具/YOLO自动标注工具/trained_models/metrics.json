@@ -14,5 +14,21 @@
     "recall": 0.8255,
     "images": 125,
     "epochs": 100
+  },
+  "v4": {
+    "version": "v4",
+    "map50": 50.0,
+    "precision": 0.93,
+    "recall": 0.9051,
+    "images": 313,
+    "epochs": 100
+  },
+  "v5": {
+    "version": "v5",
+    "map50": 50.0,
+    "precision": 0.9581,
+    "recall": 0.9453,
+    "images": 370,
+    "epochs": 100
   }
 }

@@ -14,23 +14,53 @@ LABELS_TRAIN_DIR = DATASET_DIR / "labels" / "train"
 LABELS_VAL_DIR = DATASET_DIR / "labels" / "val"
 DATA_YAML = DATASET_DIR / "data.yaml"
 
-# 审查缓存文件：记录已审查图片的 stem
+# 审查缓存文件：记录已审查（待训练）图片的 stem
 REVIEWED_CACHE_FILE = LABELS_TRAIN_DIR / ".reviewed"
+
+# 已训练缓存文件：记录已训练完成（历史审核）图片的 stem
+TRAINED_CACHE_FILE = LABELS_TRAIN_DIR / ".trained"
 
 
 def load_reviewed_stems() -> set[str]:
-    """加载已审查的图片 stem 集合。"""
+    """加载已审查（待训练）的图片 stem 集合。"""
     if REVIEWED_CACHE_FILE.exists():
         return set(REVIEWED_CACHE_FILE.read_text(encoding="utf-8").strip().splitlines())
     return set()
 
 
 def save_reviewed_stems(stems: set[str]) -> None:
-    """保存审查缓存。"""
+    """保存审查缓存（已审核，待训练）。"""
     REVIEWED_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     existing = load_reviewed_stems()
     existing.update(stems)
     REVIEWED_CACHE_FILE.write_text("\n".join(sorted(existing)), encoding="utf-8")
+
+
+def load_trained_stems() -> set[str]:
+    """加载已训练完成（历史审核）的图片 stem 集合。"""
+    if TRAINED_CACHE_FILE.exists():
+        return set(TRAINED_CACHE_FILE.read_text(encoding="utf-8").strip().splitlines())
+    return set()
+
+
+def save_trained_stems(stems: set[str]) -> None:
+    """保存已训练缓存（历史审核，累积）。"""
+    TRAINED_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing = load_trained_stems()
+    existing.update(stems)
+    TRAINED_CACHE_FILE.write_text("\n".join(sorted(existing)), encoding="utf-8")
+
+
+def mark_reviewed_as_trained() -> int:
+    """训练完成后：把当前已审核（待训练）图片归档为已训练（历史审核），并清空已审核缓存。
+
+    返回本次归档的图片数量。
+    """
+    reviewed = load_reviewed_stems()
+    if reviewed:
+        save_trained_stems(reviewed)
+    REVIEWED_CACHE_FILE.write_text("", encoding="utf-8")
+    return len(reviewed)
 
 # 历史审查轮次
 HISTORY_DIR = DATASET_DIR / "history"
@@ -73,8 +103,9 @@ CONFIG_FILE = PROJECT_DIR / "config_cache.json"
 # 截图参数
 # ============================================================
 WINDOW_TITLE: str = "冒险岛怀旧服"
-TARGET_W: int = 1280
-TARGET_H: int = 720
+# 截图统一为游戏窗口客户区原始尺寸（与自动脚本/地图标记工具一致）
+TARGET_W: int = 1366
+TARGET_H: int = 768
 IMAGE_FORMAT: str = "PNG"
 INTERVAL: float = 1.0
 

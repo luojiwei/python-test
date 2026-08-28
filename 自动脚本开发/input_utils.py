@@ -183,8 +183,20 @@ def find_window_by_title(title: str):
 
 
 def force_foreground(hwnd: int) -> None:
+    """强制将窗口调到最前（多重手段，Windows 10+ SetForegroundWindow 常被拒绝）。
+
+    依次尝试: 还原最小化 → BringWindowToTop/SetActiveWindow →
+    SetForegroundWindow(AttachThreadInput 绕过前台限制) → 复查补拉。
+    """
     if ctypes.windll.user32.IsIconic(hwnd):
-        ctypes.windll.user32.ShowWindow(hwnd, 9)
+        ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE，先还原最小化
+    # 1) BringWindowToTop + SetActiveWindow
+    try:
+        ctypes.windll.user32.BringWindowToTop(hwnd)
+        ctypes.windll.user32.SetActiveWindow(hwnd)
+    except Exception:
+        pass
+    # 2) SetForegroundWindow：AttachThreadInput 绕过前台限制
     cur = ctypes.windll.kernel32.GetCurrentThreadId()
     tgt = ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.c_ulong())
     att = False
@@ -196,6 +208,12 @@ def force_foreground(hwnd: int) -> None:
     finally:
         if att:
             ctypes.windll.user32.AttachThreadInput(cur, tgt, False)
+    # 3) 复查：仍不是前台则再补一次（部分游戏窗口需要）
+    if ctypes.windll.user32.GetForegroundWindow() != hwnd:
+        try:
+            ctypes.windll.user32.BringWindowToTop(hwnd)
+        except Exception:
+            pass
 
 
 def capture_frame(hwnd: int) -> np.ndarray | None:

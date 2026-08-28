@@ -49,7 +49,9 @@ class PlatformMixin:
         mr = int(self.mm_right_var.get())
         mb = int(self.mm_bottom_var.get())
         self.mm_offsets = (ml, mt, mr, mb)
-        self.mm_size = (mr - ml, mb - mt)
+        if self._full_minimap_np is None:
+            self.mm_size = (mr - ml, mb - mt)
+        self._ensure_mm_snapshot()  # 有完整小地图时 mm_size/背景切换为完整口径
 
         self.status_text.set(f"平台标记中... 记录角色位置 (地图: {map_name})")
 
@@ -113,12 +115,15 @@ class PlatformMixin:
                 if not debug_frame_saved:
                     os.makedirs(OUTPUT_DIR, exist_ok=True)
                     cv2.imwrite(str(OUTPUT_DIR / "debug_platform_mm.png"), mm)
-                    self._mm_snapshot = Image.fromarray(mm[:, :, ::-1])
+                    if self._mm_snapshot is None:  # 完整小地图背景已加载时保留
+                        self._mm_snapshot = Image.fromarray(mm[:, :, ::-1])
                     debug_frame_saved = True
 
                 pos = detect_player_dot(mm, self.player_tracker)
                 if pos:
-                    self.platform_recorder.add(pos[0], pos[1])
+                    wp = self._to_world_pos(mm, pos)
+                    if wp is not None:
+                        self.platform_recorder.add(wp[0], wp[1])
 
                 self.frame_count += 1
 

@@ -38,7 +38,7 @@ MODELS_ROOT = Path(__file__).resolve().parent.parent / "trained_models"
 DEFAULT_INPUT = Path(__file__).resolve().parent.parent / "screenshots"
 DEFAULT_OUTPUT = Path(__file__).resolve().parent.parent / "dataset" / "labels" / "train"
 
-TARGET_W, TARGET_H = 1280, 720
+TARGET_W, TARGET_H = 1366, 768
 CONF = 0.3
 IOU = 0.5
 
@@ -249,6 +249,8 @@ def main():
     parser.add_argument("--conf", type=float, default=CONF, help="置信度阈值")
     parser.add_argument("--iou", type=float, default=IOU, help="IoU 阈值")
     parser.add_argument("--model-file", default="", help="指定模型 pt 文件路径（覆盖自动选择）")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="跳过已有标注文件的图片（不重新标注）")
     args = parser.parse_args()
 
     input_dir = Path(args.input) if args.input else DEFAULT_INPUT
@@ -259,6 +261,17 @@ def main():
     if not images:
         _log("图片池为空，退出")
         return
+
+    # 跳过已有标注的图片（历史审核/已审核的标注沿用，不重新标）
+    if args.skip_existing:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        existing = {f.stem for f in output_dir.glob("*.txt")}
+        before = len(images)
+        images = [img for img in images if img.stem not in existing]
+        _log(f"跳过已标注: {before - len(images)} 张，剩余待标注: {len(images)} 张")
+        if not images:
+            _log("全部图片已有标注，无需标注")
+            return
 
     gpu = gpu_utils.detect_gpu()
     _log(f"=== YOLO 多模型自动标注 ===")
