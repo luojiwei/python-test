@@ -1,0 +1,12 @@
+{
+  "start_countdown": 3.0,
+  "phase_duration": 120.0,
+  "ctrl_count": 3,
+  "ctrl_hold": 0.1,
+  "ctrl_gap": 0.5,
+  "chord_hold": 0.1,
+  "chord_gap": 0.1,
+  "number_interval": 280.0,
+  "number_hold": 0.1,
+  "number_gap": 0.1
+}
